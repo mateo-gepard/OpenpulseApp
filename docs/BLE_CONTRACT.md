@@ -114,6 +114,22 @@ Record kinds:
 | `3` | clean shutdown marker |
 | `4` | gap marker |
 
+## Raw PPG Frame
+
+The firmware sends this frame in response to `Request Raw PPG Window`.
+If the sensor is unavailable or no FIFO samples are ready, `payload length`
+is `0`; the status bytes still report the real hardware state.
+
+| Offset | Type | Field |
+|---:|---|---|
+| 0 | `uint8` | frame type = `0x30` |
+| 1 | `uint16` | sequence |
+| 3 | `uint16` | requested window seconds |
+| 5 | `uint8` | attached |
+| 6 | `uint8` | sensor status |
+| 7 | `uint8` | payload length |
+| 8..n | bytes | raw MAXM86161 FIFO bytes, 3 bytes per FIFO item |
+
 ## Puck Status
 
 Puck status notification:

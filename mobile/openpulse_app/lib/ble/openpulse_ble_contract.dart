@@ -149,13 +149,20 @@ class OpenPulseBleContract {
     }
     if (bytes[0] == 0x30 && bytes.length >= 8) {
       final data = ByteData.sublistView(Uint8List.fromList(bytes));
+      final declaredPayloadLength = bytes[7];
+      final availablePayloadLength = bytes.length > 8 ? bytes.length - 8 : 0;
+      final payloadLength = declaredPayloadLength <= availablePayloadLength
+          ? declaredPayloadLength
+          : availablePayloadLength;
+      final payload = bytes.skip(8).take(payloadLength).toList(growable: false);
       return RawPpgFrame(
         receivedAt: receivedAt,
         sequence: data.getUint16(1, Endian.little),
         requestedSeconds: data.getUint16(3, Endian.little),
         attached: bytes[5] == 1,
         sensorStatus: bytes[6],
-        payloadHex: _hex(bytes.sublist(7)),
+        payloadLength: payloadLength,
+        payloadHex: _hex(payload),
       );
     }
     return RawPpgFrame(
@@ -164,6 +171,7 @@ class OpenPulseBleContract {
       requestedSeconds: null,
       attached: null,
       sensorStatus: null,
+      payloadLength: bytes.length,
       payloadHex: _hex(bytes),
     );
   }

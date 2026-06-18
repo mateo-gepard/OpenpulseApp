@@ -58,5 +58,34 @@ void main() {
     expect(frame.requestedSeconds, 10);
     expect(frame.attached, isFalse);
     expect(frame.sensorLabel, 'Unavailable');
+    expect(frame.payloadLength, 0);
+    expect(frame.payloadHex, isEmpty);
+  });
+
+  test('parses raw PPG FIFO payload frames', () {
+    final frame = OpenPulseBleContract.parseRawPpgFrame([
+      0x30,
+      0x04,
+      0x00,
+      0x05,
+      0x00,
+      0x01,
+      0x00,
+      0x06,
+      0x08,
+      0x12,
+      0x34,
+      0x09,
+      0x56,
+      0x78,
+    ], DateTime.fromMillisecondsSinceEpoch(1000));
+
+    expect(frame, isNotNull);
+    expect(frame!.sequence, 4);
+    expect(frame.requestedSeconds, 5);
+    expect(frame.attached, isTrue);
+    expect(frame.sensorLabel, 'OK');
+    expect(frame.payloadLength, 6);
+    expect(frame.payloadHex, '081234095678');
   });
 }

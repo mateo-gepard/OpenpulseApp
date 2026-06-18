@@ -272,6 +272,7 @@ class RawPpgFrame {
     required this.requestedSeconds,
     required this.attached,
     required this.sensorStatus,
+    required this.payloadLength,
     required this.payloadHex,
   });
 
@@ -280,6 +281,7 @@ class RawPpgFrame {
   final int? requestedSeconds;
   final bool? attached;
   final int? sensorStatus;
+  final int payloadLength;
   final String payloadHex;
 
   String get sensorLabel {

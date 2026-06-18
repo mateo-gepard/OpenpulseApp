@@ -125,10 +125,30 @@ class OpenPulseStorage {
         requested_seconds INTEGER,
         attached INTEGER,
         sensor_status INTEGER,
+        payload_length INTEGER NOT NULL,
         payload_hex TEXT NOT NULL,
         FOREIGN KEY(session_id) REFERENCES device_sessions(id)
       );
     ''');
+    _addColumnIfMissing(
+      db,
+      table: 'raw_ppg_frames',
+      column: 'payload_length',
+      definition: 'INTEGER NOT NULL DEFAULT 0',
+    );
+  }
+
+  void _addColumnIfMissing(
+    Database db, {
+    required String table,
+    required String column,
+    required String definition,
+  }) {
+    final columns = db.select('PRAGMA table_info($table);');
+    final exists = columns.any((row) => row['name'] == column);
+    if (!exists) {
+      db.execute('ALTER TABLE $table ADD COLUMN $column $definition;');
+    }
   }
 
   int insertSession({
@@ -312,8 +332,8 @@ class OpenPulseStorage {
     _requireDb().execute(
       '''
       INSERT INTO raw_ppg_frames (
-        session_id, received_at_ms, sequence, requested_seconds, attached, sensor_status, payload_hex
-      ) VALUES (?, ?, ?, ?, ?, ?, ?)
+        session_id, received_at_ms, sequence, requested_seconds, attached, sensor_status, payload_length, payload_hex
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
       ''',
       [
         sessionId,
@@ -322,6 +342,7 @@ class OpenPulseStorage {
         frame.requestedSeconds,
         frame.attached == null ? null : (frame.attached! ? 1 : 0),
         frame.sensorStatus,
+        frame.payloadLength,
         frame.payloadHex,
       ],
     );

@@ -532,6 +532,8 @@ class DevicePage extends StatelessWidget {
                 label: 'Raw PPG',
                 value: controller.latestRawPpgFrame == null
                     ? 'Unavailable'
+                    : controller.latestRawPpgFrame!.payloadLength > 0
+                    ? '${controller.latestRawPpgFrame!.payloadLength} bytes'
                     : controller.latestRawPpgFrame!.sensorLabel,
               ),
               OutlinedButton.icon(
