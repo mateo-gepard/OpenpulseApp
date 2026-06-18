@@ -80,9 +80,23 @@ class OpenPulseStorage {
         accel_milli_g INTEGER,
         spo2_percent INTEGER,
         quality_flags INTEGER NOT NULL,
+        step_count INTEGER,
+        motion_status INTEGER,
         FOREIGN KEY(session_id) REFERENCES device_sessions(id)
       );
     ''');
+    _addColumnIfMissing(
+      db,
+      table: 'live_records',
+      column: 'step_count',
+      definition: 'INTEGER',
+    );
+    _addColumnIfMissing(
+      db,
+      table: 'live_records',
+      column: 'motion_status',
+      definition: 'INTEGER',
+    );
     db.execute('''
       CREATE TABLE IF NOT EXISTS control_writes (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -253,8 +267,10 @@ class OpenPulseStorage {
         ibi_ms,
         accel_milli_g,
         spo2_percent,
-        quality_flags
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        quality_flags,
+        step_count,
+        motion_status
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ''',
       [
         sessionId,
@@ -269,6 +285,8 @@ class OpenPulseStorage {
         record.accelMilliG,
         record.spo2Percent,
         record.qualityFlags,
+        record.stepCount,
+        record.motionStatus,
       ],
     );
   }

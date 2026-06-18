@@ -6,6 +6,8 @@ import '../models/openpulse_models.dart';
 
 class OpenPulseBleContract {
   static const advertisedName = 'OpenPulse';
+  static const legacyLiveRecordLength = 12;
+  static const activityLiveRecordLength = 17;
 
   static final serviceUuid = Guid('f04d0000-57f5-4f5a-9b80-4f6f2f1d0001');
   static final controlUuid = Guid('f04d0001-57f5-4f5a-9b80-4f6f2f1d0001');
@@ -139,7 +141,7 @@ class OpenPulseBleContract {
       recordKind: bytes[1],
       sequence: data.getUint16(2, Endian.little),
       payloadLength: payloadLength,
-      payloadHex: _hex(payload),
+      payloadHex: bytesToHex(payload),
     );
   }
 
@@ -162,7 +164,7 @@ class OpenPulseBleContract {
         attached: bytes[5] == 1,
         sensorStatus: bytes[6],
         payloadLength: payloadLength,
-        payloadHex: _hex(payload),
+        payloadHex: bytesToHex(payload),
       );
     }
     return RawPpgFrame(
@@ -172,7 +174,7 @@ class OpenPulseBleContract {
       attached: null,
       sensorStatus: null,
       payloadLength: bytes.length,
-      payloadHex: _hex(bytes),
+      payloadHex: bytesToHex(bytes),
     );
   }
 
@@ -189,12 +191,17 @@ class OpenPulseBleContract {
     final data = ByteData.sublistView(Uint8List.fromList(bytes));
     final count = data.getUint8(1);
     final sequence = data.getUint16(2, Endian.little);
+    final availableRecordBytes = bytes.length - 4;
+    final recordLength =
+        count > 0 && availableRecordBytes >= count * activityLiveRecordLength
+        ? activityLiveRecordLength
+        : legacyLiveRecordLength;
     var offset = 4;
     var deviceUptime = previousDeviceUptimeMs;
     final records = <LiveRecord>[];
 
     for (var i = 0; i < count; i++) {
-      if (offset + 12 > bytes.length) {
+      if (offset + recordLength > bytes.length) {
         break;
       }
       final delta = data.getUint32(offset, Endian.little);
@@ -203,6 +210,12 @@ class OpenPulseBleContract {
       final accel = data.getInt16(offset + 8, Endian.little);
       final spo2 = data.getUint8(offset + 10);
       final quality = data.getUint8(offset + 11);
+      final stepCount = recordLength >= activityLiveRecordLength
+          ? data.getUint32(offset + 12, Endian.little)
+          : null;
+      final motionStatus = recordLength >= activityLiveRecordLength
+          ? data.getUint8(offset + 16)
+          : null;
       deviceUptime += delta;
 
       final wallTimeMs = syncedUnixMs + (deviceUptime - syncedDeviceUptimeMs);
@@ -217,9 +230,11 @@ class OpenPulseBleContract {
           accelMilliG: accel == 0 ? null : accel,
           spo2Percent: spo2 == 0xff ? null : spo2,
           qualityFlags: quality,
+          stepCount: stepCount,
+          motionStatus: motionStatus,
         ),
       );
-      offset += 12;
+      offset += recordLength;
     }
 
     return ParsedLiveFrame(
@@ -229,7 +244,7 @@ class OpenPulseBleContract {
     );
   }
 
-  static String _hex(List<int> bytes) {
+  static String bytesToHex(List<int> bytes) {
     return bytes.map((byte) => byte.toRadixString(16).padLeft(2, '0')).join();
   }
 }

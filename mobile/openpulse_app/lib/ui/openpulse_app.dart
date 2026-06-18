@@ -64,6 +64,7 @@ class _OpenPulseShellState extends State<OpenPulseShell> {
 
   static const _tabs = [
     (Icons.speed_rounded, 'Home'),
+    (Icons.monitor_heart_rounded, 'Live'),
     (Icons.favorite_rounded, 'Recovery'),
     (Icons.bedtime_rounded, 'Sleep'),
     (Icons.directions_run_rounded, 'Activity'),
@@ -78,6 +79,7 @@ class _OpenPulseShellState extends State<OpenPulseShell> {
         final controller = widget.controller;
         final pages = [
           HomePage(controller: controller),
+          LiveDataPage(controller: controller),
           RecoveryPage(controller: controller),
           SleepPage(controller: controller),
           ActivityPage(controller: controller),
@@ -222,30 +224,46 @@ class HomePage extends StatelessWidget {
             children: [
               _MetricTile(
                 label: 'HR',
-                value: live?.heartRateBpm == null
-                    ? 'Unavailable'
-                    : live!.heartRateBpm!.toStringAsFixed(1),
+                value: live == null
+                    ? 'Waiting'
+                    : live.heartRateBpm == null
+                    ? 'Not computed'
+                    : live.heartRateBpm!.toStringAsFixed(1),
                 unit: live?.heartRateBpm == null ? '' : 'bpm',
               ),
               _MetricTile(
                 label: 'IBI',
-                value: live?.ibiMs?.toString() ?? 'Unavailable',
+                value: live == null
+                    ? 'Waiting'
+                    : live.ibiMs?.toString() ?? 'Not computed',
                 unit: live?.ibiMs == null ? '' : 'ms',
               ),
               _MetricTile(
                 label: 'SpO2',
-                value: live?.spo2Percent?.toString() ?? 'Unavailable',
+                value: live == null
+                    ? 'Waiting'
+                    : live.spo2Percent?.toString() ?? 'Not computed',
                 unit: live?.spo2Percent == null ? '' : '%',
               ),
               _MetricTile(
                 label: 'Quality',
-                value: live?.qualityLabel ?? 'Unavailable',
+                value: live?.qualityLabel ?? 'Waiting',
                 unit: '',
+              ),
+              _MetricTile(
+                label: 'Packets',
+                value: controller.livePacketCount.toString(),
+                unit: 'live',
+              ),
+              _MetricTile(
+                label: 'Steps',
+                value: live?.stepCount?.toString() ?? 'Waiting',
+                unit: live?.stepCount == null ? '' : 'IMU',
               ),
               _MetricTile(
                 label: 'Raw PPG',
                 value: raw == null
-                    ? 'Unavailable'
+                    ? 'Waiting'
                     : raw.payloadLength > 0
                     ? raw.payloadLength.toString()
                     : raw.sensorLabel,
@@ -275,7 +293,7 @@ class HomePage extends StatelessWidget {
         _MetricCard(
           icon: Icons.schedule_rounded,
           title: 'Last packet',
-          value: live == null ? 'Unavailable' : _clock(live.receivedAt),
+          value: live == null ? 'Waiting' : _clock(live.receivedAt),
           footer: live == null ? '' : 'Stored locally',
           color: _green,
         ),
@@ -304,6 +322,154 @@ class HomePage extends StatelessWidget {
                     ),
                   ],
                 ),
+              ),
+            ],
+          ),
+        ),
+      ],
+    );
+  }
+}
+
+class LiveDataPage extends StatelessWidget {
+  const LiveDataPage({super.key, required this.controller});
+
+  final OpenPulseController controller;
+
+  @override
+  Widget build(BuildContext context) {
+    final live = controller.latestLiveRecord;
+    final raw = controller.latestRawPpgFrame;
+    final frameHex = _hexPreview(controller.latestLiveFrameHex);
+    final rawHex = raw == null ? 'Waiting for raw PPG' : raw.previewHex;
+
+    return _Grid(
+      children: [
+        _Panel(
+          title: 'Raw live BLE',
+          eyebrow: controller.phase == ConnectionPhase.streaming
+              ? 'Subscribed'
+              : 'Waiting',
+          trailing: _Dot(live: controller.livePacketCount > 0),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Wrap(
+                spacing: 10,
+                runSpacing: 10,
+                children: [
+                  _MiniStatus(
+                    label: 'Packets',
+                    value: controller.livePacketCount.toString(),
+                  ),
+                  _MiniStatus(
+                    label: 'Last bytes',
+                    value: controller.latestLiveFrameByteCount == 0
+                        ? 'Waiting'
+                        : controller.latestLiveFrameByteCount.toString(),
+                  ),
+                  _MiniStatus(
+                    label: 'Sequence',
+                    value: live?.sequence.toString() ?? 'Waiting',
+                  ),
+                ],
+              ),
+              const SizedBox(height: 12),
+              Expanded(child: _HexBox(text: frameHex)),
+            ],
+          ),
+        ),
+        _Panel(
+          title: 'Latest live record',
+          eyebrow: 'Parsed from packet',
+          child: Column(
+            children: [
+              _FactRow(
+                'Device uptime',
+                live == null ? 'Waiting' : '${live.deviceUptimeMs} ms',
+              ),
+              _FactRow(
+                'Wall time',
+                live == null ? 'Waiting' : _clock(live.wallTime),
+              ),
+              _FactRow(
+                'Accel magnitude',
+                live?.accelMilliG == null
+                    ? 'Waiting'
+                    : '${live!.accelMilliG} mg',
+              ),
+              _FactRow('Steps', live?.stepCount?.toString() ?? 'Waiting'),
+              _FactRow('IMU', live?.motionLabel ?? 'Waiting'),
+              _FactRow(
+                'Quality flags',
+                live == null
+                    ? 'Waiting'
+                    : '0x${live.qualityFlags.toRadixString(16).padLeft(2, '0')}',
+              ),
+            ],
+          ),
+        ),
+        _Panel(
+          title: 'Raw PPG',
+          eyebrow: controller.rawPpgReady ? 'Subscribed' : 'Waiting',
+          trailing: IconButton(
+            tooltip: 'Request raw PPG',
+            onPressed: controller.customServiceReady
+                ? controller.requestRawPpgWindow
+                : null,
+            icon: const Icon(Icons.show_chart_rounded),
+          ),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Wrap(
+                spacing: 10,
+                runSpacing: 10,
+                children: [
+                  _MiniStatus(
+                    label: 'Packets',
+                    value: controller.rawPpgPacketCount.toString(),
+                  ),
+                  _MiniStatus(
+                    label: 'Payload',
+                    value: raw == null
+                        ? 'Waiting'
+                        : '${raw.payloadLength} bytes',
+                  ),
+                  _MiniStatus(
+                    label: 'Sensor',
+                    value: raw?.sensorLabel ?? 'Waiting',
+                  ),
+                ],
+              ),
+              const SizedBox(height: 12),
+              Expanded(child: _HexBox(text: rawHex)),
+            ],
+          ),
+        ),
+        _Panel(
+          title: 'Notifications',
+          eyebrow: controller.notificationsReady
+              ? 'Configured'
+              : 'Not configured',
+          child: Column(
+            children: [
+              _FactRow(
+                'Permission',
+                controller.notificationPermissionGranted
+                    ? 'Allowed'
+                    : 'Not allowed',
+              ),
+              _FactRow(
+                'Drop alerts',
+                controller.notificationPermissionGranted
+                    ? 'Ready'
+                    : 'Needs permission',
+              ),
+              _FactRow('Step goal', '${controller.stepGoal} steps'),
+              _FactRow(
+                'Goal state',
+                controller.stepGoalReached ? 'Reached' : 'In progress',
               ),
             ],
           ),
@@ -350,10 +516,74 @@ class ActivityPage extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return const _UnavailablePage(
-      icon: Icons.directions_run_rounded,
-      title: 'Activity unavailable',
-      body: 'Requires real HR and motion records before strain is calculated.',
+    final live = controller.latestLiveRecord;
+    final steps = live?.stepCount;
+    final progress = steps == null
+        ? 0.0
+        : (steps / controller.stepGoal).clamp(0.0, 1.0).toDouble();
+
+    return _Grid(
+      children: [
+        _MetricCard(
+          icon: Icons.directions_walk_rounded,
+          title: 'Steps',
+          value: steps?.toString() ?? 'Waiting',
+          footer: live?.motionLabel ?? 'Waiting for IMU live record',
+          color: _green,
+        ),
+        _Panel(
+          title: 'Step goal',
+          eyebrow: controller.stepGoalReached ? 'Reached' : 'Real IMU count',
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              LinearProgressIndicator(value: progress),
+              const SizedBox(height: 14),
+              _FactRow('Current', steps == null ? 'Waiting' : '$steps steps'),
+              _FactRow('Goal', '${controller.stepGoal} steps'),
+              const SizedBox(height: 10),
+              Wrap(
+                spacing: 8,
+                runSpacing: 8,
+                children: [
+                  for (final goal in const [10, 100, 1000, 10000])
+                    ChoiceChip(
+                      label: Text('$goal'),
+                      selected: controller.stepGoal == goal,
+                      onSelected: (_) => controller.setStepGoal(goal),
+                    ),
+                ],
+              ),
+            ],
+          ),
+        ),
+        _Panel(
+          title: 'Motion sample',
+          eyebrow: 'Accelerometer',
+          child: Column(
+            children: [
+              _FactRow(
+                'Magnitude',
+                live?.accelMilliG == null
+                    ? 'Waiting'
+                    : '${live!.accelMilliG} mg',
+              ),
+              _FactRow('IMU status', live?.motionLabel ?? 'Waiting'),
+              _FactRow('Live packets', controller.livePacketCount.toString()),
+              _FactRow(
+                'Last packet',
+                live == null ? 'Waiting' : _clock(live.receivedAt),
+              ),
+            ],
+          ),
+        ),
+        const _UnavailablePage(
+          icon: Icons.speed_rounded,
+          title: 'Strain unavailable',
+          body:
+              'Requires validated HR and motion processing before strain is calculated.',
+        ),
+      ],
     );
   }
 }
@@ -401,6 +631,16 @@ class DevicePage extends StatelessWidget {
               _FactRow(
                 'Raw PPG',
                 controller.rawPpgReady ? 'Ready' : 'Unavailable',
+              ),
+              _FactRow(
+                'Notifications',
+                controller.notificationPermissionGranted
+                    ? 'Ready'
+                    : 'Needs permission',
+              ),
+              _FactRow(
+                'Steps',
+                controller.latestLiveRecord?.stepCount?.toString() ?? 'Waiting',
               ),
               _FactRow(
                 'Puck',
@@ -665,7 +905,7 @@ class _Grid extends StatelessWidget {
           mainAxisSpacing: 12,
           shrinkWrap: true,
           physics: const NeverScrollableScrollPhysics(),
-          childAspectRatio: columns == 1 ? 1.65 : 1.55,
+          childAspectRatio: columns == 1 ? 1.08 : 1.35,
           children: children,
         );
       },
@@ -900,6 +1140,35 @@ class _MiniStatus extends StatelessWidget {
   }
 }
 
+class _HexBox extends StatelessWidget {
+  const _HexBox({required this.text});
+
+  final String text;
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.all(10),
+      decoration: BoxDecoration(
+        color: const Color(0xfff2f4f8),
+        borderRadius: BorderRadius.circular(8),
+      ),
+      child: SingleChildScrollView(
+        child: SelectableText(
+          text,
+          style: const TextStyle(
+            color: _ink,
+            fontFamily: 'Helvetica',
+            fontSize: 12,
+            height: 1.35,
+          ),
+        ),
+      ),
+    );
+  }
+}
+
 class _SliderRow extends StatelessWidget {
   const _SliderRow({
     required this.label,
@@ -1095,4 +1364,14 @@ String _clock(DateTime date) {
   final minute = date.minute.toString().padLeft(2, '0');
   final second = date.second.toString().padLeft(2, '0');
   return '$hour:$minute:$second';
+}
+
+String _hexPreview(String? hex) {
+  if (hex == null || hex.isEmpty) {
+    return 'Waiting for live packet bytes';
+  }
+  if (hex.length <= 160) {
+    return hex;
+  }
+  return '${hex.substring(0, 160)}...';
 }

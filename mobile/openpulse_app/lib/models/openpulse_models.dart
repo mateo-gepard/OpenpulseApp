@@ -148,6 +148,8 @@ class LiveRecord {
     required this.accelMilliG,
     required this.spo2Percent,
     required this.qualityFlags,
+    required this.stepCount,
+    required this.motionStatus,
   });
 
   final DateTime receivedAt;
@@ -159,12 +161,28 @@ class LiveRecord {
   final int? accelMilliG;
   final int? spo2Percent;
   final int qualityFlags;
+  final int? stepCount;
+  final int? motionStatus;
 
   bool get hasSkinContact => qualityFlags & 0x01 != 0;
   bool get hasMotionArtifact => qualityFlags & 0x02 != 0;
   bool get hasLowPerfusion => qualityFlags & 0x04 != 0;
   bool get puckChanged => qualityFlags & 0x08 != 0;
   bool get batteryLow => qualityFlags & 0x10 != 0;
+  bool get motionAvailable => motionStatus == 0;
+
+  String get motionLabel {
+    switch (motionStatus) {
+      case 0:
+        return 'OK';
+      case 1:
+        return 'Unavailable';
+      case null:
+        return 'Not reported';
+      default:
+        return 'Status $motionStatus';
+    }
+  }
 
   String get qualityLabel {
     if (puckChanged) {
@@ -299,5 +317,12 @@ class RawPpgFrame {
       default:
         return 'Status $sensorStatus';
     }
+  }
+
+  String get previewHex {
+    if (payloadHex.length <= 48) {
+      return payloadHex;
+    }
+    return '${payloadHex.substring(0, 48)}...';
   }
 }

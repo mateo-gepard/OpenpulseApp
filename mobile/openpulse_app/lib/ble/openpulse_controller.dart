@@ -5,13 +5,16 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter_blue_plus/flutter_blue_plus.dart';
 
 import '../models/openpulse_models.dart';
+import '../notifications/openpulse_notifications.dart';
 import '../storage/openpulse_storage.dart';
 import 'openpulse_ble_contract.dart';
 
 class OpenPulseController extends ChangeNotifier {
-  OpenPulseController(this.storage);
+  OpenPulseController(this.storage, {OpenPulseNotifications? notifications})
+    : notifications = notifications ?? OpenPulseNotifications();
 
   final OpenPulseStorage storage;
+  final OpenPulseNotifications notifications;
 
   ConnectionPhase phase = ConnectionPhase.disconnected;
   String statusMessage = 'Ready to scan for real OpenPulse hardware.';
@@ -23,12 +26,19 @@ class OpenPulseController extends ChangeNotifier {
   ControlAck? latestControlAck;
   BulkBackfillFrame? latestBackfillFrame;
   RawPpgFrame? latestRawPpgFrame;
+  int livePacketCount = 0;
+  int rawPpgPacketCount = 0;
+  int latestLiveFrameByteCount = 0;
+  String? latestLiveFrameHex;
   DeviceMode selectedMode = DeviceMode.active;
   int samplingHz = 25;
   int ledGreenMa = 8;
   int ledRedMa = 4;
   int ledIrMa = 4;
+  int stepGoal = 10000;
   bool storageReady = false;
+  bool notificationsReady = false;
+  bool notificationPermissionGranted = false;
   bool gattReady = false;
   bool customServiceReady = false;
   bool batteryServiceReady = false;
@@ -36,6 +46,7 @@ class OpenPulseController extends ChangeNotifier {
   bool controlNotifyReady = false;
   bool bulkBackfillReady = false;
   bool rawPpgReady = false;
+  bool stepGoalNotified = false;
 
   BluetoothDevice? _device;
   BluetoothCharacteristic? _control;
@@ -55,6 +66,14 @@ class OpenPulseController extends ChangeNotifier {
   int _syncedUnixMs = 0;
   int _syncedDeviceUptimeMs = 0;
   Timer? _rawPollTimer;
+  Timer? _autoScanRetryTimer;
+
+  int? get currentStepCount => latestLiveRecord?.stepCount;
+
+  bool get stepGoalReached {
+    final steps = currentStepCount;
+    return steps != null && steps >= stepGoal;
+  }
 
   String? get deviceName {
     final device = _device;
@@ -73,9 +92,22 @@ class OpenPulseController extends ChangeNotifier {
     try {
       await storage.open();
       storageReady = true;
+      try {
+        await notifications.initialize();
+        notificationsReady = notifications.ready;
+        notificationPermissionGranted = notifications.permissionGranted;
+      } catch (_) {
+        notificationsReady = false;
+        notificationPermissionGranted = false;
+      }
       adapterState = FlutterBluePlus.adapterStateNow;
       _adapterSubscription = FlutterBluePlus.adapterState.listen((state) {
         adapterState = state;
+        if (state == BluetoothAdapterState.on &&
+            phase == ConnectionPhase.disconnected &&
+            !_intentionalDisconnect) {
+          _scheduleScanRetry(Duration.zero);
+        }
         notifyListeners();
       });
       await FlutterBluePlus.setOptions(
@@ -83,7 +115,9 @@ class OpenPulseController extends ChangeNotifier {
         restoreState: true,
       );
       notifyListeners();
-      unawaited(scanAndConnect());
+      if (adapterState == BluetoothAdapterState.on) {
+        _scheduleScanRetry(Duration.zero);
+      }
     } catch (error) {
       _setPhase(
         ConnectionPhase.error,
@@ -96,6 +130,8 @@ class OpenPulseController extends ChangeNotifier {
     if (_connectInFlight) {
       return;
     }
+    _autoScanRetryTimer?.cancel();
+    _autoScanRetryTimer = null;
     final supported = await FlutterBluePlus.isSupported;
     if (!supported) {
       _setPhase(
@@ -105,12 +141,12 @@ class OpenPulseController extends ChangeNotifier {
       return;
     }
     final state = FlutterBluePlus.adapterStateNow;
-    if (state != BluetoothAdapterState.on &&
-        state != BluetoothAdapterState.unknown) {
+    if (state != BluetoothAdapterState.on) {
       _setPhase(
         ConnectionPhase.bluetoothUnavailable,
         'Bluetooth is ${state.name}. Turn it on and grant permission.',
       );
+      _scheduleScanRetry();
       return;
     }
 
@@ -122,11 +158,13 @@ class OpenPulseController extends ChangeNotifier {
     );
 
     const scanDuration = Duration(seconds: 10);
-    await FlutterBluePlus.startScan(
-      withNames: const [OpenPulseBleContract.advertisedName],
-      withServices: [OpenPulseBleContract.serviceUuid],
-      timeout: scanDuration,
-    );
+    try {
+      await FlutterBluePlus.startScan(timeout: scanDuration);
+    } catch (error) {
+      _setPhase(ConnectionPhase.error, 'BLE scan failed: $error');
+      _scheduleScanRetry();
+      return;
+    }
     await Future<void>.delayed(
       scanDuration + const Duration(milliseconds: 300),
     );
@@ -135,11 +173,14 @@ class OpenPulseController extends ChangeNotifier {
         ConnectionPhase.disconnected,
         'No OpenPulse advertisement found yet.',
       );
+      _scheduleScanRetry();
     }
   }
 
   Future<void> disconnect() async {
     _intentionalDisconnect = true;
+    _autoScanRetryTimer?.cancel();
+    _autoScanRetryTimer = null;
     await FlutterBluePlus.stopScan();
     await _scanSubscription?.cancel();
     _scanSubscription = null;
@@ -175,6 +216,17 @@ class OpenPulseController extends ChangeNotifier {
         irMa: irMa,
       ),
     );
+    notifyListeners();
+  }
+
+  void setStepGoal(int goal) {
+    stepGoal = goal.clamp(10, 100000).toInt();
+    final steps = currentStepCount;
+    if (steps == null || steps < stepGoal) {
+      stepGoalNotified = false;
+    } else {
+      _notifyStepGoalIfNeeded(steps);
+    }
     notifyListeners();
   }
 
@@ -225,12 +277,21 @@ class OpenPulseController extends ChangeNotifier {
     }
     for (final result in results) {
       final advName = result.advertisementData.advName;
+      final serviceUuids = result.advertisementData.serviceUuids;
       final device = result.device;
       final isOpenPulse =
           advName == OpenPulseBleContract.advertisedName ||
           device.advName == OpenPulseBleContract.advertisedName ||
-          device.platformName == OpenPulseBleContract.advertisedName;
+          device.platformName == OpenPulseBleContract.advertisedName ||
+          serviceUuids.any(
+            (uuid) => OpenPulseBleContract.uuidMatches(
+              uuid,
+              OpenPulseBleContract.serviceUuid,
+            ),
+          );
       if (isOpenPulse) {
+        _autoScanRetryTimer?.cancel();
+        _autoScanRetryTimer = null;
         unawaited(FlutterBluePlus.stopScan());
         unawaited(_connect(result.device));
         return;
@@ -285,6 +346,7 @@ class OpenPulseController extends ChangeNotifier {
     } catch (error) {
       _clearGatt();
       _setPhase(ConnectionPhase.error, 'BLE connection failed: $error');
+      _scheduleScanRetry();
     } finally {
       _connectInFlight = false;
     }
@@ -562,6 +624,8 @@ class OpenPulseController extends ChangeNotifier {
   }
 
   void _handleLiveFrame(List<int> bytes) {
+    latestLiveFrameByteCount = bytes.length;
+    latestLiveFrameHex = OpenPulseBleContract.bytesToHex(bytes);
     final parsed = OpenPulseBleContract.parseLiveFrame(
       bytes: bytes,
       previousDeviceUptimeMs: _lastDeviceUptimeMs,
@@ -572,11 +636,21 @@ class OpenPulseController extends ChangeNotifier {
     if (parsed == null || parsed.records.isEmpty) {
       return;
     }
+    livePacketCount++;
     _lastDeviceUptimeMs = parsed.lastDeviceUptimeMs;
     for (final record in parsed.records) {
       latestLiveRecord = record;
       storage.insertLiveRecord(_sessionId, record);
     }
+    final steps = latestLiveRecord?.stepCount;
+    if (steps != null) {
+      if (steps < stepGoal) {
+        stepGoalNotified = false;
+      } else {
+        _notifyStepGoalIfNeeded(steps);
+      }
+    }
+    statusMessage = 'Live BLE packet #${parsed.sequence} received.';
     notifyListeners();
   }
 
@@ -595,8 +669,12 @@ class OpenPulseController extends ChangeNotifier {
     if (frame == null) {
       return;
     }
+    rawPpgPacketCount++;
     latestRawPpgFrame = frame;
     storage.insertRawPpgFrame(_sessionId, frame);
+    statusMessage = frame.payloadLength > 0
+        ? 'Raw PPG packet #${frame.sequence}: ${frame.payloadLength} bytes.'
+        : 'Raw PPG packet #${frame.sequence}: ${frame.sensorLabel}.';
     notifyListeners();
   }
 
@@ -614,13 +692,25 @@ class OpenPulseController extends ChangeNotifier {
   }
 
   void _handleUnexpectedDisconnect() {
+    unawaited(notifications.connectionDropped());
     storage.closeSession(_sessionId);
     _clearGatt(closeSession: false);
     _setPhase(ConnectionPhase.reconnecting, 'BLE link lost. Reconnecting.');
-    Future<void>(() async {
-      await Future<void>.delayed(const Duration(seconds: 2));
-      if (!_intentionalDisconnect) {
-        await scanAndConnect();
+    _scheduleScanRetry(const Duration(seconds: 2));
+  }
+
+  void _scheduleScanRetry([Duration delay = const Duration(seconds: 3)]) {
+    if (_intentionalDisconnect ||
+        _connectInFlight ||
+        phase == ConnectionPhase.streaming) {
+      return;
+    }
+    _autoScanRetryTimer?.cancel();
+    _autoScanRetryTimer = Timer(delay, () {
+      if (!_intentionalDisconnect &&
+          !_connectInFlight &&
+          phase != ConnectionPhase.streaming) {
+        unawaited(scanAndConnect());
       }
     });
   }
@@ -646,6 +736,13 @@ class OpenPulseController extends ChangeNotifier {
     _puck = null;
     _battery = null;
     _lastDeviceUptimeMs = 0;
+    livePacketCount = 0;
+    rawPpgPacketCount = 0;
+    latestLiveFrameByteCount = 0;
+    latestLiveFrameHex = null;
+    stepGoalNotified = false;
+    latestLiveRecord = null;
+    latestRawPpgFrame = null;
     for (final subscription in _valueSubscriptions) {
       unawaited(subscription.cancel());
     }
@@ -658,9 +755,18 @@ class OpenPulseController extends ChangeNotifier {
     notifyListeners();
   }
 
+  void _notifyStepGoalIfNeeded(int steps) {
+    if (stepGoalNotified) {
+      return;
+    }
+    stepGoalNotified = true;
+    unawaited(notifications.stepGoalReached(steps: steps, goal: stepGoal));
+  }
+
   @override
   void dispose() {
     _rawPollTimer?.cancel();
+    _autoScanRetryTimer?.cancel();
     unawaited(_adapterSubscription?.cancel());
     unawaited(_scanSubscription?.cancel());
     unawaited(_connectionSubscription?.cancel());

@@ -3,6 +3,7 @@
 #include <zephyr/drivers/adc.h>
 #include <zephyr/drivers/gpio.h>
 #include <zephyr/drivers/i2c.h>
+#include <zephyr/drivers/sensor.h>
 #include <zephyr/kernel.h>
 #include <zephyr/logging/log.h>
 #include <zephyr/sys/byteorder.h>
@@ -13,6 +14,7 @@
 #include <zephyr/bluetooth/hci.h>
 #include <zephyr/bluetooth/uuid.h>
 #include <errno.h>
+#include <limits.h>
 #include <string.h>
 
 LOG_MODULE_REGISTER(openpulse, LOG_LEVEL_INF);
@@ -53,6 +55,8 @@ LOG_MODULE_REGISTER(openpulse, LOG_LEVEL_INF);
 #define OP_FRAME_BACKFILL 0x20
 #define OP_FRAME_RAW_PPG 0x30
 #define OP_RECORD_KIND_GAP_MARKER 4
+#define OP_LIVE_RECORD_BASE_LEN 12
+#define OP_LIVE_RECORD_ACTIVITY_LEN 17
 #define OP_RAW_FRAME_HEADER_LEN 8
 #define OP_RAW_MAX_PAYLOAD_BYTES 12
 
@@ -64,6 +68,11 @@ LOG_MODULE_REGISTER(openpulse, LOG_LEVEL_INF);
 #define OP_SENSOR_STATUS_UNAVAILABLE 1
 #define OP_SENSOR_STATUS_I2C_NOT_READY 2
 #define OP_SENSOR_STATUS_UNEXPECTED_PART_ID 3
+#define OP_MOTION_STATUS_OK 0
+#define OP_MOTION_STATUS_UNAVAILABLE 1
+#define OP_STEP_ARM_THRESHOLD_MG 90
+#define OP_STEP_TRIGGER_THRESHOLD_MG 180
+#define OP_STEP_REFRACTORY_MS 300
 
 #define OP_QUALITY_SKIN_CONTACT BIT(0)
 #define OP_QUALITY_LOW_PERFUSION BIT(2)
@@ -89,6 +98,9 @@ static bool battery_notify_enabled;
 static bool time_synced;
 static uint64_t synced_unix_ms;
 static uint64_t synced_device_uptime_ms;
+static int64_t connected_at_ms;
+static int64_t last_app_activity_ms;
+static bool stale_connection_disconnect_requested;
 static enum op_mode current_mode = OP_MODE_STANDBY;
 static uint16_t live_sequence;
 static uint16_t bulk_sequence;
@@ -104,9 +116,16 @@ static uint8_t maxm86161_config_led_red_ma;
 static uint8_t maxm86161_config_led_ir_ma;
 static uint16_t pending_raw_seconds;
 static uint8_t pending_raw_sensor_status = OP_SENSOR_STATUS_UNAVAILABLE;
+static bool imu_ready;
+static int16_t latest_accel_milli_g;
+static uint32_t step_count;
+static uint8_t motion_status = OP_MOTION_STATUS_UNAVAILABLE;
+static bool step_peak_armed = true;
+static int64_t last_step_ms;
 
 static uint8_t battery_level = 0xff;
 static bool battery_level_known;
+static bool battery_adc_ready;
 static uint8_t last_puck_status[4] = {
 	OP_EVENT_REMOVED,
 	OP_PUCK_KIND_PPG,
@@ -118,10 +137,14 @@ extern const struct bt_gatt_service_static openpulse_svc;
 
 static void stream_work_handler(struct k_work *work);
 static void sensor_work_handler(struct k_work *work);
+static void motion_work_handler(struct k_work *work);
 static void raw_window_work_handler(struct k_work *work);
+static void advertising_work_handler(struct k_work *work);
 static K_WORK_DELAYABLE_DEFINE(stream_work, stream_work_handler);
 static K_WORK_DELAYABLE_DEFINE(sensor_work, sensor_work_handler);
+static K_WORK_DELAYABLE_DEFINE(motion_work, motion_work_handler);
 static K_WORK_DELAYABLE_DEFINE(raw_window_work, raw_window_work_handler);
+static K_WORK_DELAYABLE_DEFINE(advertising_work, advertising_work_handler);
 
 static struct bt_uuid_16 dis_service_uuid = BT_UUID_INIT_16(0x180a);
 static struct bt_uuid_16 dis_manufacturer_uuid = BT_UUID_INIT_16(0x2a29);
@@ -163,17 +186,24 @@ static ssize_t read_static_string(struct bt_conn *conn,
 	return bt_gatt_attr_read(conn, attr, buf, len, offset, value, strlen(value));
 }
 
+static void mark_app_activity(void)
+{
+	last_app_activity_ms = k_uptime_get();
+}
+
 static ssize_t read_battery_level(struct bt_conn *conn,
 				  const struct bt_gatt_attr *attr,
 				  void *buf,
 				  uint16_t len,
 				  uint16_t offset)
 {
+	mark_app_activity();
 	return bt_gatt_attr_read(conn, attr, buf, len, offset, &battery_level, sizeof(battery_level));
 }
 
 static void battery_ccc_changed(const struct bt_gatt_attr *attr, uint16_t value)
 {
+	mark_app_activity();
 	battery_notify_enabled = (value == BT_GATT_CCC_NOTIFY);
 }
 
@@ -227,6 +257,7 @@ static ssize_t read_control(struct bt_conn *conn,
 {
 	uint8_t status[12];
 
+	mark_app_activity();
 	status[0] = time_synced ? 1 : 0;
 	status[1] = (uint8_t)current_mode;
 	status[2] = battery_level_known ? battery_level : 0xff;
@@ -299,6 +330,7 @@ static ssize_t write_control(struct bt_conn *conn,
 	uint8_t payload_len;
 	const uint8_t *payload;
 
+	mark_app_activity();
 	if (offset != 0 || len < 2) {
 		return BT_GATT_ERR(BT_ATT_ERR_INVALID_OFFSET);
 	}
@@ -389,16 +421,19 @@ static ssize_t read_puck_status(struct bt_conn *conn,
 				uint16_t len,
 				uint16_t offset)
 {
+	mark_app_activity();
 	return bt_gatt_attr_read(conn, attr, buf, len, offset, last_puck_status, sizeof(last_puck_status));
 }
 
 static void control_ccc_changed(const struct bt_gatt_attr *attr, uint16_t value)
 {
+	mark_app_activity();
 	control_notify_enabled = (value == BT_GATT_CCC_NOTIFY);
 }
 
 static void live_ccc_changed(const struct bt_gatt_attr *attr, uint16_t value)
 {
+	mark_app_activity();
 	live_notify_enabled = (value == BT_GATT_CCC_NOTIFY);
 	if (live_notify_enabled && time_synced) {
 		k_work_reschedule(&stream_work, K_NO_WAIT);
@@ -407,16 +442,19 @@ static void live_ccc_changed(const struct bt_gatt_attr *attr, uint16_t value)
 
 static void bulk_ccc_changed(const struct bt_gatt_attr *attr, uint16_t value)
 {
+	mark_app_activity();
 	bulk_notify_enabled = (value == BT_GATT_CCC_NOTIFY || value == BT_GATT_CCC_INDICATE);
 }
 
 static void raw_ccc_changed(const struct bt_gatt_attr *attr, uint16_t value)
 {
+	mark_app_activity();
 	raw_notify_enabled = (value == BT_GATT_CCC_NOTIFY);
 }
 
 static void puck_ccc_changed(const struct bt_gatt_attr *attr, uint16_t value)
 {
+	mark_app_activity();
 	puck_notify_enabled = (value == BT_GATT_CCC_NOTIFY);
 	if (puck_notify_enabled) {
 		(void)notify_puck_status();
@@ -472,6 +510,13 @@ static const struct device *const ppg_i2c1 = DEVICE_DT_GET(DT_NODELABEL(i2c1));
 static const struct device *active_ppg_i2c;
 static const char *active_ppg_i2c_name = "none";
 static uint8_t last_probe_status = 0xff;
+#endif
+
+#if DT_NODE_HAS_STATUS(DT_NODELABEL(lsm6ds3tr_c), okay)
+#define OPENPULSE_HAS_IMU 1
+static const struct device *const imu_dev = DEVICE_DT_GET(DT_NODELABEL(lsm6ds3tr_c));
+#else
+#define OPENPULSE_HAS_IMU 0
 #endif
 
 #if DT_NODE_HAS_PROP(DT_PATH(zephyr_user), io_channels)
@@ -886,6 +931,134 @@ static void send_raw_window_from_fifo(uint16_t seconds, uint8_t status)
 	send_raw_frame(seconds, OP_SENSOR_STATUS_OK, payload, payload_len);
 }
 
+static uint32_t isqrt_u64(uint64_t value)
+{
+	uint64_t root = 0;
+	uint64_t bit = 1ULL << 62;
+
+	while (bit > value) {
+		bit >>= 2;
+	}
+
+	while (bit != 0) {
+		if (value >= root + bit) {
+			value -= root + bit;
+			root = (root >> 1) + bit;
+		} else {
+			root >>= 1;
+		}
+		bit >>= 2;
+	}
+
+	return root > UINT32_MAX ? UINT32_MAX : (uint32_t)root;
+}
+
+static int32_t sensor_value_to_milli_g(const struct sensor_value *value)
+{
+	int64_t micro_ms2 = ((int64_t)value->val1 * 1000000LL) + value->val2;
+
+	return (int32_t)((micro_ms2 * 1000LL) / 9806650LL);
+}
+
+static void update_steps_from_accel(int16_t accel_milli_g)
+{
+	int32_t dynamic_mg = accel_milli_g >= 1000 ?
+			    accel_milli_g - 1000 : 1000 - accel_milli_g;
+	int64_t now_ms = k_uptime_get();
+
+	if (dynamic_mg < OP_STEP_ARM_THRESHOLD_MG) {
+		step_peak_armed = true;
+	}
+
+	if (step_peak_armed &&
+	    dynamic_mg > OP_STEP_TRIGGER_THRESHOLD_MG &&
+	    now_ms - last_step_ms > OP_STEP_REFRACTORY_MS) {
+		step_count++;
+		last_step_ms = now_ms;
+		step_peak_armed = false;
+	}
+}
+
+static void configure_motion_sensor(void)
+{
+#if OPENPULSE_HAS_IMU
+	struct sensor_value odr = {
+		.val1 = 26,
+		.val2 = 0,
+	};
+	int err;
+
+	if (!device_is_ready(imu_dev)) {
+		LOG_WRN("LSM6DSL accelerometer is not ready");
+		imu_ready = false;
+		motion_status = OP_MOTION_STATUS_UNAVAILABLE;
+		return;
+	}
+
+	err = sensor_attr_set(imu_dev, SENSOR_CHAN_ACCEL_XYZ,
+			      SENSOR_ATTR_SAMPLING_FREQUENCY, &odr);
+	if (err) {
+		LOG_WRN("LSM6DSL accelerometer ODR setup failed: %d", err);
+	}
+
+	imu_ready = true;
+	motion_status = OP_MOTION_STATUS_OK;
+	LOG_INF("LSM6DSL accelerometer ready for steps");
+#else
+	imu_ready = false;
+	motion_status = OP_MOTION_STATUS_UNAVAILABLE;
+#endif
+}
+
+static void sample_motion(void)
+{
+#if OPENPULSE_HAS_IMU
+	struct sensor_value accel[3];
+	int32_t x_mg;
+	int32_t y_mg;
+	int32_t z_mg;
+	int64_t x;
+	int64_t y;
+	int64_t z;
+	uint64_t magnitude_sq;
+	uint32_t magnitude_mg;
+
+	if (!imu_ready) {
+		motion_status = OP_MOTION_STATUS_UNAVAILABLE;
+		latest_accel_milli_g = 0;
+		return;
+	}
+
+	if (sensor_sample_fetch_chan(imu_dev, SENSOR_CHAN_ACCEL_XYZ) ||
+	    sensor_channel_get(imu_dev, SENSOR_CHAN_ACCEL_X, &accel[0]) ||
+	    sensor_channel_get(imu_dev, SENSOR_CHAN_ACCEL_Y, &accel[1]) ||
+	    sensor_channel_get(imu_dev, SENSOR_CHAN_ACCEL_Z, &accel[2])) {
+		motion_status = OP_MOTION_STATUS_UNAVAILABLE;
+		latest_accel_milli_g = 0;
+		return;
+	}
+
+	x_mg = sensor_value_to_milli_g(&accel[0]);
+	y_mg = sensor_value_to_milli_g(&accel[1]);
+	z_mg = sensor_value_to_milli_g(&accel[2]);
+	x = x_mg;
+	y = y_mg;
+	z = z_mg;
+	magnitude_sq = (uint64_t)((x * x) + (y * y) + (z * z));
+	magnitude_mg = isqrt_u64(magnitude_sq);
+	if (magnitude_mg > INT16_MAX) {
+		magnitude_mg = INT16_MAX;
+	}
+
+	latest_accel_milli_g = (int16_t)magnitude_mg;
+	motion_status = OP_MOTION_STATUS_OK;
+	update_steps_from_accel(latest_accel_milli_g);
+#else
+	motion_status = OP_MOTION_STATUS_UNAVAILABLE;
+	latest_accel_milli_g = 0;
+#endif
+}
+
 static uint8_t battery_soc_from_mv(int32_t mv)
 {
 	if (mv >= 4200) {
@@ -909,7 +1082,7 @@ static void read_battery(void)
 	int err;
 	int32_t mv;
 
-	if (!adc_is_ready_dt(&vbat_adc)) {
+	if (!battery_adc_ready || !adc_is_ready_dt(&vbat_adc)) {
 		battery_level = 0xff;
 		battery_level_known = false;
 		return;
@@ -983,6 +1156,14 @@ static void sensor_work_handler(struct k_work *work)
 	k_work_reschedule(&sensor_work, K_SECONDS(5));
 }
 
+static void motion_work_handler(struct k_work *work)
+{
+	ARG_UNUSED(work);
+
+	sample_motion();
+	k_work_reschedule(&motion_work, K_MSEC(100));
+}
+
 static void raw_window_work_handler(struct k_work *work)
 {
 	ARG_UNUSED(work);
@@ -990,14 +1171,43 @@ static void raw_window_work_handler(struct k_work *work)
 	send_raw_window_from_fifo(pending_raw_seconds, pending_raw_sensor_status);
 }
 
+static void advertising_work_handler(struct k_work *work)
+{
+	int err;
+
+	ARG_UNUSED(work);
+
+	if (current_conn) {
+		if (connected_at_ms > 0 &&
+		    last_app_activity_ms > 0 &&
+		    k_uptime_get() - last_app_activity_ms > 20000 &&
+		    !stale_connection_disconnect_requested) {
+			stale_connection_disconnect_requested = true;
+			LOG_WRN("BLE connection has no recent app activity; disconnecting");
+			(void)bt_conn_disconnect(current_conn, BT_HCI_ERR_REMOTE_USER_TERM_CONN);
+		}
+	} else {
+		err = start_advertising();
+		if (err == 0) {
+			LOG_INF("Advertising as OpenPulse");
+		} else if (err != -EALREADY) {
+			LOG_WRN("BLE advertising retry failed: %d", err);
+		}
+	}
+
+	k_work_reschedule(&advertising_work, K_SECONDS(3));
+}
+
 static void stream_work_handler(struct k_work *work)
 {
-	uint8_t frame[16];
+	uint8_t frame[4 + OP_LIVE_RECORD_ACTIVITY_LEN];
 	uint8_t quality = 0;
 
 	if (!current_conn || !live_notify_enabled || !time_synced || current_mode == OP_MODE_SHIP) {
 		return;
 	}
+
+	sample_motion();
 
 	if (last_puck_status[2]) {
 		quality |= OP_QUALITY_LOW_PERFUSION;
@@ -1015,9 +1225,11 @@ static void stream_work_handler(struct k_work *work)
 	sys_put_le32(1000, &frame[4]);
 	sys_put_le16(0, &frame[8]);
 	sys_put_le16(0, &frame[10]);
-	sys_put_le16(0, &frame[12]);
+	sys_put_le16((uint16_t)latest_accel_milli_g, &frame[12]);
 	frame[14] = 0xff;
 	frame[15] = quality;
+	sys_put_le32(step_count, &frame[16]);
+	frame[20] = motion_status;
 
 	(void)bt_gatt_notify(current_conn, &openpulse_svc.attrs[5], frame, sizeof(frame));
 
@@ -1037,6 +1249,9 @@ static void connected(struct bt_conn *conn, uint8_t err)
 
 	current_conn = bt_conn_ref(conn);
 	time_synced = false;
+	connected_at_ms = k_uptime_get();
+	last_app_activity_ms = connected_at_ms;
+	stale_connection_disconnect_requested = false;
 	LOG_INF("BLE connected");
 }
 
@@ -1055,6 +1270,9 @@ static void disconnected(struct bt_conn *conn, uint8_t reason)
 	puck_notify_enabled = false;
 	battery_notify_enabled = false;
 	time_synced = false;
+	connected_at_ms = 0;
+	last_app_activity_ms = 0;
+	stale_connection_disconnect_requested = false;
 
 	if (current_conn) {
 		bt_conn_unref(current_conn);
@@ -1106,10 +1324,14 @@ int main(void)
 		err = adc_channel_setup_dt(&vbat_adc);
 		if (err) {
 			LOG_WRN("Battery ADC setup failed: %d", err);
+		} else {
+			battery_adc_ready = true;
 		}
 	}
 #endif
 
+	configure_motion_sensor();
+	sample_motion();
 	read_battery();
 	update_puck_status(prepare_maxm86161());
 
@@ -1120,13 +1342,15 @@ int main(void)
 	}
 
 	err = start_advertising();
-	if (err) {
+	if (err && err != -EALREADY) {
 		LOG_ERR("BLE advertising failed: %d", err);
-		return 0;
+	} else {
+		LOG_INF("Advertising as OpenPulse");
 	}
 
-	LOG_INF("Advertising as OpenPulse");
 	k_work_schedule(&sensor_work, K_NO_WAIT);
+	k_work_schedule(&motion_work, K_MSEC(100));
+	k_work_schedule(&advertising_work, K_SECONDS(3));
 
 	return 0;
 }

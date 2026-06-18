@@ -88,4 +88,44 @@ void main() {
     expect(frame.payloadLength, 6);
     expect(frame.payloadHex, '081234095678');
   });
+
+  test('parses extended live frames with IMU steps', () {
+    final frame = OpenPulseBleContract.parseLiveFrame(
+      bytes: [
+        0x10,
+        0x01,
+        0x07,
+        0x00,
+        0xe8,
+        0x03,
+        0x00,
+        0x00,
+        0x00,
+        0x00,
+        0x00,
+        0x00,
+        0xe9,
+        0x03,
+        0xff,
+        0x04,
+        0xd2,
+        0x04,
+        0x00,
+        0x00,
+        0x00,
+      ],
+      previousDeviceUptimeMs: 5000,
+      syncedUnixMs: 100000,
+      syncedDeviceUptimeMs: 5000,
+      receivedAt: DateTime.fromMillisecondsSinceEpoch(2000),
+    );
+
+    expect(frame, isNotNull);
+    expect(frame!.sequence, 7);
+    expect(frame.lastDeviceUptimeMs, 6000);
+    expect(frame.records.single.accelMilliG, 1001);
+    expect(frame.records.single.stepCount, 1234);
+    expect(frame.records.single.motionLabel, 'OK');
+    expect(frame.records.single.spo2Percent, isNull);
+  });
 }

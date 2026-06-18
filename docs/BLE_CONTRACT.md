@@ -84,6 +84,19 @@ Live record:
 | `int16` | accel magnitude milli-g |
 | `uint8` | spo2 percent, `0xFF` if unavailable |
 | `uint8` | quality flags |
+| `uint32` | step count from onboard IMU, optional activity extension |
+| `uint8` | motion status, optional activity extension |
+
+Firmware built after the activity extension sends 17-byte live records. The
+first 12 bytes remain the original live record. Apps should accept both the
+legacy 12-byte record and the extended 17-byte record.
+
+Motion status:
+
+| Value | Meaning |
+|---:|---|
+| `0` | OK |
+| `1` | unavailable |
 
 Quality flags:
 
