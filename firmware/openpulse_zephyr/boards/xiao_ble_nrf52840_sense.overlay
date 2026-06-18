@@ -1,0 +1,10 @@
+&adc {
+	status = "okay";
+};
+
+/ {
+	zephyr,user {
+		io-channels = <&adc 7>;
+		battery-enable-gpios = <&gpio0 14 GPIO_ACTIVE_HIGH>;
+	};
+};
