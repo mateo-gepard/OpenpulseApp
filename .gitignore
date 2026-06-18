@@ -11,3 +11,22 @@ yarn-debug.log*
 yarn-error.log*
 pnpm-debug.log*
 vite-dev*.log
+
+# Flutter / mobile build output
+mobile/openpulse_app/.dart_tool/
+mobile/openpulse_app/.flutter-plugins
+mobile/openpulse_app/.flutter-plugins-dependencies
+mobile/openpulse_app/build/
+mobile/openpulse_app/ios/Flutter/ephemeral/
+mobile/openpulse_app/ios/Pods/
+mobile/openpulse_app/ios/.symlinks/
+mobile/openpulse_app/ios/Flutter/Flutter.framework
+mobile/openpulse_app/ios/Flutter/Flutter.podspec
+mobile/openpulse_app/android/.gradle/
+mobile/openpulse_app/android/local.properties
+
+# Zephyr / firmware build output
+build/
+firmware/openpulse_zephyr/build/
+zephyrproject/
+.west/
