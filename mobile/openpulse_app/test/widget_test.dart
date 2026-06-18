@@ -9,7 +9,8 @@ void main() {
 
     await tester.pumpWidget(OpenPulseApp(controller: controller));
 
-    expect(find.text('OPENPULSE BLE'), findsOneWidget);
+    expect(find.text('Today'), findsWidgets);
+    expect(find.text('Waiting for OpenPulse'), findsOneWidget);
     expect(find.text('Unavailable'), findsWidgets);
     expect(find.text('Flutter Demo Home Page'), findsNothing);
   });

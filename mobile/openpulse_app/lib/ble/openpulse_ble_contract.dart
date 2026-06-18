@@ -165,6 +165,7 @@ class OpenPulseBleContract {
         sensorStatus: bytes[6],
         payloadLength: payloadLength,
         payloadHex: bytesToHex(payload),
+        samples: parseRawPpgSamples(payload),
       );
     }
     return RawPpgFrame(
@@ -175,7 +176,18 @@ class OpenPulseBleContract {
       sensorStatus: null,
       payloadLength: bytes.length,
       payloadHex: bytesToHex(bytes),
+      samples: parseRawPpgSamples(bytes),
     );
+  }
+
+  static List<int> parseRawPpgSamples(List<int> payload) {
+    final samples = <int>[];
+    for (var i = 0; i + 2 < payload.length; i += 3) {
+      samples.add(
+        ((payload[i] & 0x1f) << 16) | (payload[i + 1] << 8) | payload[i + 2],
+      );
+    }
+    return samples;
   }
 
   static ParsedLiveFrame? parseLiveFrame({

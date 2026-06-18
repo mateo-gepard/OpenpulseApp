@@ -1,15 +1,22 @@
+import 'dart:math' as math;
+
 import 'package:flutter/material.dart';
 
 import '../ble/openpulse_controller.dart';
 import '../models/openpulse_models.dart';
 
-const _brand = Color(0xffd33e43);
-const _ink = Color(0xff1c1f33);
-const _muted = Color(0xff6d7280);
-const _line = Color(0xffe4e7ee);
-const _panel = Color(0xffffffff);
-const _green = Color(0xff22a699);
-const _yellow = Color(0xfff2b84b);
+const _bg = Color(0xff10181c);
+const _surface = Color(0xff1c262b);
+const _surface2 = Color(0xff263137);
+const _line = Color(0xff344148);
+const _text = Color(0xfff5f7f8);
+const _muted = Color(0xff97a1a8);
+const _red = Color(0xfff2353d);
+const _navy = Color(0xff081633);
+const _blush = Color(0xffc98d80);
+const _mint = Color(0xff65f0cd);
+const _blue = Color(0xff78bdf8);
+const _amber = Color(0xffffc65a);
 
 class OpenPulseApp extends StatelessWidget {
   const OpenPulseApp({super.key, required this.controller});
@@ -23,26 +30,25 @@ class OpenPulseApp extends StatelessWidget {
       debugShowCheckedModeBanner: false,
       theme: ThemeData(
         useMaterial3: true,
+        brightness: Brightness.dark,
         fontFamily: 'Helvetica',
-        scaffoldBackgroundColor: const Color(0xfff6f7fb),
+        scaffoldBackgroundColor: _bg,
         colorScheme: ColorScheme.fromSeed(
-          seedColor: _brand,
-          primary: _brand,
-          secondary: _green,
-          surface: _panel,
+          seedColor: _red,
+          brightness: Brightness.dark,
+          primary: _red,
+          secondary: _mint,
+          surface: _surface,
         ),
-        textTheme: Typography.blackCupertino.apply(
+        textTheme: Typography.whiteCupertino.apply(
           fontFamily: 'Helvetica',
-          bodyColor: _ink,
-          displayColor: _ink,
+          bodyColor: _text,
+          displayColor: _text,
         ),
-        cardTheme: const CardThemeData(
-          color: _panel,
-          elevation: 0,
-          shape: RoundedRectangleBorder(
-            borderRadius: BorderRadius.all(Radius.circular(8)),
-            side: BorderSide(color: _line),
-          ),
+        sliderTheme: const SliderThemeData(
+          trackHeight: 8,
+          thumbShape: RoundSliderThumbShape(enabledThumbRadius: 10),
+          overlayShape: RoundSliderOverlayShape(overlayRadius: 18),
         ),
       ),
       home: OpenPulseShell(controller: controller),
@@ -63,12 +69,10 @@ class _OpenPulseShellState extends State<OpenPulseShell> {
   int _tab = 0;
 
   static const _tabs = [
-    (Icons.speed_rounded, 'Home'),
+    (Icons.home_rounded, 'Today'),
     (Icons.monitor_heart_rounded, 'Live'),
-    (Icons.favorite_rounded, 'Recovery'),
-    (Icons.bedtime_rounded, 'Sleep'),
-    (Icons.directions_run_rounded, 'Activity'),
-    (Icons.watch_rounded, 'Device'),
+    (Icons.calendar_month_rounded, 'History'),
+    (Icons.tune_rounded, 'Device'),
   ];
 
   @override
@@ -78,74 +82,34 @@ class _OpenPulseShellState extends State<OpenPulseShell> {
       builder: (context, _) {
         final controller = widget.controller;
         final pages = [
-          HomePage(controller: controller),
-          LiveDataPage(controller: controller),
-          RecoveryPage(controller: controller),
-          SleepPage(controller: controller),
-          ActivityPage(controller: controller),
-          DevicePage(controller: controller),
+          TodayView(controller: controller),
+          LiveView(controller: controller),
+          HistoryView(controller: controller),
+          DeviceView(controller: controller),
         ];
 
         return Scaffold(
           body: SafeArea(
-            child: LayoutBuilder(
-              builder: (context, constraints) {
-                final wide = constraints.maxWidth >= 860;
-                final content = Column(
-                  children: [
-                    _TopBar(controller: controller, title: _tabs[_tab].$2),
-                    Expanded(
-                      child: SingleChildScrollView(
-                        padding: const EdgeInsets.fromLTRB(16, 8, 16, 24),
-                        child: pages[_tab],
-                      ),
-                    ),
-                  ],
-                );
-
-                if (!wide) {
-                  return content;
-                }
-
-                return Row(
-                  children: [
-                    NavigationRail(
-                      selectedIndex: _tab,
-                      onDestinationSelected: (index) {
-                        setState(() => _tab = index);
-                      },
-                      backgroundColor: Colors.transparent,
-                      leading: const _BrandMark(),
-                      destinations: [
-                        for (final tab in _tabs)
-                          NavigationRailDestination(
-                            icon: Icon(tab.$1),
-                            selectedIcon: Icon(tab.$1),
-                            label: Text(tab.$2),
-                          ),
-                      ],
-                    ),
-                    const VerticalDivider(width: 1, color: _line),
-                    Expanded(child: content),
-                  ],
-                );
-              },
+            child: CustomScrollView(
+              slivers: [
+                SliverToBoxAdapter(
+                  child: _Header(
+                    controller: controller,
+                    title: _tabs[_tab].$2,
+                    showDateControls: _tab == 0 || _tab == 2,
+                  ),
+                ),
+                SliverPadding(
+                  padding: const EdgeInsets.fromLTRB(18, 6, 18, 116),
+                  sliver: SliverToBoxAdapter(child: pages[_tab]),
+                ),
+              ],
             ),
           ),
-          bottomNavigationBar: LayoutBuilder(
-            builder: (context, constraints) {
-              if (constraints.maxWidth >= 860) {
-                return const SizedBox.shrink();
-              }
-              return NavigationBar(
-                selectedIndex: _tab,
-                onDestinationSelected: (index) => setState(() => _tab = index),
-                destinations: [
-                  for (final tab in _tabs)
-                    NavigationDestination(icon: Icon(tab.$1), label: tab.$2),
-                ],
-              );
-            },
+          bottomNavigationBar: _BottomNav(
+            selectedIndex: _tab,
+            tabs: _tabs,
+            onSelected: (index) => setState(() => _tab = index),
           ),
         );
       },
@@ -153,46 +117,284 @@ class _OpenPulseShellState extends State<OpenPulseShell> {
   }
 }
 
-class _TopBar extends StatelessWidget {
-  const _TopBar({required this.controller, required this.title});
+class _Header extends StatelessWidget {
+  const _Header({
+    required this.controller,
+    required this.title,
+    required this.showDateControls,
+  });
 
   final OpenPulseController controller;
   final String title;
+  final bool showDateControls;
 
   @override
   Widget build(BuildContext context) {
     final live = controller.phase == ConnectionPhase.streaming;
     return Padding(
-      padding: const EdgeInsets.fromLTRB(16, 14, 16, 8),
-      child: Row(
+      padding: const EdgeInsets.fromLTRB(18, 14, 18, 8),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(
-                  _shortDate(DateTime.now()),
-                  style: const TextStyle(
-                    color: _muted,
-                    fontSize: 12,
-                    fontWeight: FontWeight.w800,
-                  ),
+          Row(
+            children: [
+              const _LogoMark(size: 48),
+              const SizedBox(width: 12),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      title,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: const TextStyle(
+                        fontSize: 32,
+                        height: 1,
+                        fontWeight: FontWeight.w900,
+                      ),
+                    ),
+                    const SizedBox(height: 5),
+                    Text(
+                      controller.statusMessage,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: const TextStyle(color: _muted, fontSize: 13),
+                    ),
+                  ],
                 ),
-                Text(
-                  title,
-                  style: const TextStyle(
-                    fontSize: 36,
-                    fontWeight: FontWeight.w800,
-                    height: 1,
-                  ),
-                ),
-              ],
+              ),
+              _StatusPill(
+                icon: live ? Icons.bluetooth_connected : Icons.bluetooth,
+                label: live ? 'Live' : controller.phase.label,
+                color: live ? _mint : _amber,
+              ),
+            ],
+          ),
+          if (showDateControls) ...[
+            const SizedBox(height: 18),
+            _DateSwitcher(controller: controller),
+          ],
+        ],
+      ),
+    );
+  }
+}
+
+class TodayView extends StatelessWidget {
+  const TodayView({super.key, required this.controller});
+
+  final OpenPulseController controller;
+
+  @override
+  Widget build(BuildContext context) {
+    final live = controller.latestLiveRecord;
+    final raw = controller.latestRawPpgFrame;
+    final battery = controller.latestBattery;
+    final puck = controller.latestPuckStatus;
+    final summary = controller.selectedDaySummary;
+    final steps = live?.stepCount ?? summary?.maxSteps;
+    final stepProgress = steps == null
+        ? 0.0
+        : (steps / controller.stepGoal).clamp(0.0, 1.0).toDouble();
+    final ppgOk = raw?.payloadLength != null && raw!.payloadLength > 0;
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        _HeroPanel(
+          controller: controller,
+          steps: steps,
+          stepProgress: stepProgress,
+          ppgOk: ppgOk,
+        ),
+        const SizedBox(height: 18),
+        _RingRow(
+          children: [
+            _MetricRing(
+              label: 'Steps',
+              value: steps?.toString() ?? '--',
+              footer: '${controller.stepGoal} goal',
+              progress: stepProgress,
+              color: _mint,
+            ),
+            _MetricRing(
+              label: 'Live',
+              value: controller.livePacketCount.toString(),
+              footer: 'packets',
+              progress: controller.livePacketCount == 0
+                  ? 0
+                  : (controller.livePacketCount / 120).clamp(0.0, 1.0),
+              color: _blue,
+            ),
+            _MetricRing(
+              label: 'PPG',
+              value: ppgOk ? '${raw.payloadLength}' : '--',
+              footer: ppgOk ? 'bytes' : raw?.sensorLabel ?? 'waiting',
+              progress: ppgOk ? 1 : 0,
+              color: _red,
+            ),
+          ],
+        ),
+        const SizedBox(height: 18),
+        _SectionTitle('Sensor signal'),
+        _Surface(
+          child: SizedBox(
+            height: 186,
+            child: _PpgPlot(
+              samples: controller.recentRawPpgSamples,
+              fallback: controller.recentLiveRecords
+                  .map((record) => record.accelMilliG ?? 0)
+                  .where((value) => value > 0)
+                  .toList(growable: false),
             ),
           ),
-          FilledButton.icon(
-            onPressed: live ? controller.disconnect : controller.scanAndConnect,
-            icon: Icon(live ? Icons.bluetooth_connected : Icons.bluetooth),
-            label: Text(live ? 'Disconnect' : 'Scan'),
+        ),
+        const SizedBox(height: 14),
+        _MetricStrip(
+          items: [
+            _StripItem(
+              icon: Icons.favorite_rounded,
+              label: 'HR',
+              value: live?.heartRateBpm == null
+                  ? 'Not computed'
+                  : '${live!.heartRateBpm!.toStringAsFixed(1)} bpm',
+            ),
+            _StripItem(
+              icon: Icons.memory_rounded,
+              label: 'Puck',
+              value: puck == null
+                  ? 'Waiting'
+                  : puck.attached
+                  ? 'Attached'
+                  : puck.sensorLabel,
+            ),
+            _StripItem(
+              icon: Icons.battery_5_bar_rounded,
+              label: 'Battery',
+              value: battery?.display ?? 'Unavailable',
+            ),
+          ],
+        ),
+        const SizedBox(height: 18),
+        _SectionTitle('Today'),
+        _Surface(
+          child: Column(
+            children: [
+              _FactRow(
+                'Live records',
+                summary?.liveRecords.toString() ?? 'Waiting',
+              ),
+              _FactRow(
+                'Raw PPG frames',
+                summary?.rawPpgFrames.toString() ?? 'Waiting',
+              ),
+              _FactRow(
+                'Last sync',
+                summary?.lastLiveAt == null
+                    ? 'Waiting'
+                    : _timeAgo(summary!.lastLiveAt!),
+              ),
+              _FactRow(
+                'Backfill requests',
+                summary?.controlWrites.toString() ?? 'Waiting',
+              ),
+            ],
+          ),
+        ),
+      ],
+    );
+  }
+}
+
+class _HeroPanel extends StatelessWidget {
+  const _HeroPanel({
+    required this.controller,
+    required this.steps,
+    required this.stepProgress,
+    required this.ppgOk,
+  });
+
+  final OpenPulseController controller;
+  final int? steps;
+  final double stepProgress;
+  final bool ppgOk;
+
+  @override
+  Widget build(BuildContext context) {
+    final live = controller.phase == ConnectionPhase.streaming;
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.all(22),
+      decoration: BoxDecoration(
+        color: _surface,
+        borderRadius: BorderRadius.circular(28),
+        border: Border.all(color: _line),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Expanded(
+                child: Text(
+                  live ? 'OpenPulse is streaming' : 'Waiting for OpenPulse',
+                  style: const TextStyle(
+                    fontSize: 25,
+                    height: 1.05,
+                    fontWeight: FontWeight.w900,
+                  ),
+                ),
+              ),
+              FilledButton.icon(
+                onPressed: live
+                    ? controller.disconnect
+                    : controller.scanAndConnect,
+                icon: Icon(live ? Icons.bluetooth_disabled : Icons.bluetooth),
+                label: Text(live ? 'Stop' : 'Scan'),
+              ),
+            ],
+          ),
+          const SizedBox(height: 22),
+          Row(
+            crossAxisAlignment: CrossAxisAlignment.end,
+            children: [
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      steps?.toString() ?? '--',
+                      style: const TextStyle(
+                        fontSize: 58,
+                        height: 0.9,
+                        fontWeight: FontWeight.w900,
+                      ),
+                    ),
+                    const SizedBox(height: 8),
+                    const Text(
+                      'hardware steps',
+                      style: TextStyle(color: _muted),
+                    ),
+                  ],
+                ),
+              ),
+              _LogoMark(size: 84),
+            ],
+          ),
+          const SizedBox(height: 22),
+          _ProgressLine(
+            value: stepProgress,
+            color: _mint,
+            label: 'Step goal',
+            trailing: '${(stepProgress * 100).round()}%',
+          ),
+          const SizedBox(height: 10),
+          _ProgressLine(
+            value: ppgOk ? 1 : 0,
+            color: _red,
+            label: 'PPG sensor',
+            trailing: ppgOk ? 'signal' : 'waiting',
           ),
         ],
       ),
@@ -200,139 +402,8 @@ class _TopBar extends StatelessWidget {
   }
 }
 
-class HomePage extends StatelessWidget {
-  const HomePage({super.key, required this.controller});
-
-  final OpenPulseController controller;
-
-  @override
-  Widget build(BuildContext context) {
-    final live = controller.latestLiveRecord;
-    final battery = controller.latestBattery;
-    final puck = controller.latestPuckStatus;
-    final raw = controller.latestRawPpgFrame;
-    return _Grid(
-      children: [
-        _StatusCard(controller: controller),
-        _Panel(
-          title: 'Live stream',
-          eyebrow: 'OpenPulse BLE',
-          trailing: _Dot(live: controller.phase == ConnectionPhase.streaming),
-          child: Wrap(
-            spacing: 10,
-            runSpacing: 10,
-            children: [
-              _MetricTile(
-                label: 'HR',
-                value: live == null
-                    ? 'Waiting'
-                    : live.heartRateBpm == null
-                    ? 'Not computed'
-                    : live.heartRateBpm!.toStringAsFixed(1),
-                unit: live?.heartRateBpm == null ? '' : 'bpm',
-              ),
-              _MetricTile(
-                label: 'IBI',
-                value: live == null
-                    ? 'Waiting'
-                    : live.ibiMs?.toString() ?? 'Not computed',
-                unit: live?.ibiMs == null ? '' : 'ms',
-              ),
-              _MetricTile(
-                label: 'SpO2',
-                value: live == null
-                    ? 'Waiting'
-                    : live.spo2Percent?.toString() ?? 'Not computed',
-                unit: live?.spo2Percent == null ? '' : '%',
-              ),
-              _MetricTile(
-                label: 'Quality',
-                value: live?.qualityLabel ?? 'Waiting',
-                unit: '',
-              ),
-              _MetricTile(
-                label: 'Packets',
-                value: controller.livePacketCount.toString(),
-                unit: 'live',
-              ),
-              _MetricTile(
-                label: 'Steps',
-                value: live?.stepCount?.toString() ?? 'Waiting',
-                unit: live?.stepCount == null ? '' : 'IMU',
-              ),
-              _MetricTile(
-                label: 'Raw PPG',
-                value: raw == null
-                    ? 'Waiting'
-                    : raw.payloadLength > 0
-                    ? raw.payloadLength.toString()
-                    : raw.sensorLabel,
-                unit: raw != null && raw.payloadLength > 0 ? 'bytes' : '',
-              ),
-            ],
-          ),
-        ),
-        _MetricCard(
-          icon: Icons.battery_charging_full,
-          title: 'Battery',
-          value: battery?.display ?? 'Unavailable',
-          footer: battery?.available == true ? 'Standard BLE Battery' : '',
-          color: _yellow,
-        ),
-        _MetricCard(
-          icon: Icons.memory_rounded,
-          title: 'Puck',
-          value: puck == null
-              ? 'Unavailable'
-              : puck.attached
-              ? 'Attached'
-              : puck.eventLabel,
-          footer: puck?.sensorLabel ?? '',
-          color: _brand,
-        ),
-        _MetricCard(
-          icon: Icons.schedule_rounded,
-          title: 'Last packet',
-          value: live == null ? 'Waiting' : _clock(live.receivedAt),
-          footer: live == null ? '' : 'Stored locally',
-          color: _green,
-        ),
-        _Panel(
-          title: 'Device',
-          eyebrow: controller.deviceName ?? 'No connected device',
-          child: Row(
-            children: [
-              DeviceSilhouette(attached: puck?.attached == true),
-              const SizedBox(width: 16),
-              Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(
-                      puck?.puckLabel ?? 'Waiting for puck status',
-                      style: const TextStyle(
-                        fontWeight: FontWeight.w800,
-                        fontSize: 18,
-                      ),
-                    ),
-                    const SizedBox(height: 4),
-                    Text(
-                      controller.statusMessage,
-                      style: const TextStyle(color: _muted),
-                    ),
-                  ],
-                ),
-              ),
-            ],
-          ),
-        ),
-      ],
-    );
-  }
-}
-
-class LiveDataPage extends StatelessWidget {
-  const LiveDataPage({super.key, required this.controller});
+class LiveView extends StatelessWidget {
+  const LiveView({super.key, required this.controller});
 
   final OpenPulseController controller;
 
@@ -340,57 +411,62 @@ class LiveDataPage extends StatelessWidget {
   Widget build(BuildContext context) {
     final live = controller.latestLiveRecord;
     final raw = controller.latestRawPpgFrame;
-    final frameHex = _hexPreview(controller.latestLiveFrameHex);
-    final rawHex = raw == null ? 'Waiting for raw PPG' : raw.previewHex;
-
-    return _Grid(
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        _Panel(
-          title: 'Raw live BLE',
-          eyebrow: controller.phase == ConnectionPhase.streaming
-              ? 'Subscribed'
-              : 'Waiting',
-          trailing: _Dot(live: controller.livePacketCount > 0),
+        _SectionTitle('Raw PPG output'),
+        _Surface(
+          child: SizedBox(
+            height: 250,
+            child: _PpgPlot(samples: controller.recentRawPpgSamples),
+          ),
+        ),
+        const SizedBox(height: 18),
+        _SectionTitle('Motion output'),
+        _Surface(
+          child: SizedBox(
+            height: 166,
+            child: _LinePlot(
+              values: controller.recentLiveRecords
+                  .map((record) => record.accelMilliG ?? 0)
+                  .where((value) => value > 0)
+                  .toList(growable: false),
+              color: _mint,
+              emptyLabel: 'Waiting for accelerometer records',
+            ),
+          ),
+        ),
+        const SizedBox(height: 18),
+        _MetricStrip(
+          items: [
+            _StripItem(
+              icon: Icons.numbers_rounded,
+              label: 'Live packets',
+              value: controller.livePacketCount.toString(),
+            ),
+            _StripItem(
+              icon: Icons.straighten_rounded,
+              label: 'Frame bytes',
+              value: controller.latestLiveFrameByteCount == 0
+                  ? '--'
+                  : controller.latestLiveFrameByteCount.toString(),
+            ),
+            _StripItem(
+              icon: Icons.directions_walk_rounded,
+              label: 'Pedometer',
+              value: live?.motionLabel ?? 'Waiting',
+            ),
+          ],
+        ),
+        const SizedBox(height: 18),
+        _Surface(
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              Wrap(
-                spacing: 10,
-                runSpacing: 10,
-                children: [
-                  _MiniStatus(
-                    label: 'Packets',
-                    value: controller.livePacketCount.toString(),
-                  ),
-                  _MiniStatus(
-                    label: 'Last bytes',
-                    value: controller.latestLiveFrameByteCount == 0
-                        ? 'Waiting'
-                        : controller.latestLiveFrameByteCount.toString(),
-                  ),
-                  _MiniStatus(
-                    label: 'Sequence',
-                    value: live?.sequence.toString() ?? 'Waiting',
-                  ),
-                ],
-              ),
-              const SizedBox(height: 12),
-              Expanded(child: _HexBox(text: frameHex)),
-            ],
-          ),
-        ),
-        _Panel(
-          title: 'Latest live record',
-          eyebrow: 'Parsed from packet',
-          child: Column(
-            children: [
+              _FactRow('Live sequence', live?.sequence.toString() ?? 'Waiting'),
               _FactRow(
                 'Device uptime',
                 live == null ? 'Waiting' : '${live.deviceUptimeMs} ms',
-              ),
-              _FactRow(
-                'Wall time',
-                live == null ? 'Waiting' : _clock(live.wallTime),
               ),
               _FactRow(
                 'Accel magnitude',
@@ -398,79 +474,16 @@ class LiveDataPage extends StatelessWidget {
                     ? 'Waiting'
                     : '${live!.accelMilliG} mg',
               ),
-              _FactRow('Steps', live?.stepCount?.toString() ?? 'Waiting'),
-              _FactRow('IMU', live?.motionLabel ?? 'Waiting'),
               _FactRow(
-                'Quality flags',
-                live == null
+                'Raw PPG',
+                raw == null
                     ? 'Waiting'
-                    : '0x${live.qualityFlags.toRadixString(16).padLeft(2, '0')}',
-              ),
-            ],
-          ),
-        ),
-        _Panel(
-          title: 'Raw PPG',
-          eyebrow: controller.rawPpgReady ? 'Subscribed' : 'Waiting',
-          trailing: IconButton(
-            tooltip: 'Request raw PPG',
-            onPressed: controller.customServiceReady
-                ? controller.requestRawPpgWindow
-                : null,
-            icon: const Icon(Icons.show_chart_rounded),
-          ),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Wrap(
-                spacing: 10,
-                runSpacing: 10,
-                children: [
-                  _MiniStatus(
-                    label: 'Packets',
-                    value: controller.rawPpgPacketCount.toString(),
-                  ),
-                  _MiniStatus(
-                    label: 'Payload',
-                    value: raw == null
-                        ? 'Waiting'
-                        : '${raw.payloadLength} bytes',
-                  ),
-                  _MiniStatus(
-                    label: 'Sensor',
-                    value: raw?.sensorLabel ?? 'Waiting',
-                  ),
-                ],
+                    : raw.payloadLength > 0
+                    ? '${raw.payloadLength} bytes'
+                    : raw.sensorLabel,
               ),
               const SizedBox(height: 12),
-              Expanded(child: _HexBox(text: rawHex)),
-            ],
-          ),
-        ),
-        _Panel(
-          title: 'Notifications',
-          eyebrow: controller.notificationsReady
-              ? 'Configured'
-              : 'Not configured',
-          child: Column(
-            children: [
-              _FactRow(
-                'Permission',
-                controller.notificationPermissionGranted
-                    ? 'Allowed'
-                    : 'Not allowed',
-              ),
-              _FactRow(
-                'Drop alerts',
-                controller.notificationPermissionGranted
-                    ? 'Ready'
-                    : 'Needs permission',
-              ),
-              _FactRow('Step goal', '${controller.stepGoal} steps'),
-              _FactRow(
-                'Goal state',
-                controller.stepGoalReached ? 'Reached' : 'In progress',
-              ),
+              _HexBox(text: _hexPreview(controller.latestLiveFrameHex)),
             ],
           ),
         ),
@@ -479,223 +492,131 @@ class LiveDataPage extends StatelessWidget {
   }
 }
 
-class RecoveryPage extends StatelessWidget {
-  const RecoveryPage({super.key, required this.controller});
+class HistoryView extends StatelessWidget {
+  const HistoryView({super.key, required this.controller});
 
   final OpenPulseController controller;
 
   @override
   Widget build(BuildContext context) {
-    return const _UnavailablePage(
-      icon: Icons.favorite_rounded,
-      title: 'Recovery unavailable',
-      body: 'Requires real overnight HR/IBI records and baseline history.',
-    );
-  }
-}
-
-class SleepPage extends StatelessWidget {
-  const SleepPage({super.key, required this.controller});
-
-  final OpenPulseController controller;
-
-  @override
-  Widget build(BuildContext context) {
-    return const _UnavailablePage(
-      icon: Icons.bedtime_rounded,
-      title: 'Sleep unavailable',
-      body: 'Requires real overnight records from the wearable.',
-    );
-  }
-}
-
-class ActivityPage extends StatelessWidget {
-  const ActivityPage({super.key, required this.controller});
-
-  final OpenPulseController controller;
-
-  @override
-  Widget build(BuildContext context) {
-    final live = controller.latestLiveRecord;
-    final steps = live?.stepCount;
-    final progress = steps == null
-        ? 0.0
-        : (steps / controller.stepGoal).clamp(0.0, 1.0).toDouble();
-
-    return _Grid(
+    final summary = controller.selectedDaySummary;
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        _MetricCard(
-          icon: Icons.directions_walk_rounded,
-          title: 'Steps',
-          value: steps?.toString() ?? 'Waiting',
-          footer: live?.motionLabel ?? 'Waiting for IMU live record',
-          color: _green,
+        _Surface(
+          child: Column(
+            children: [
+              _FactRow('Date', _dayLabel(controller.selectedDay)),
+              _FactRow('Live records', summary?.liveRecords.toString() ?? '0'),
+              _FactRow(
+                'Raw PPG frames',
+                summary?.rawPpgFrames.toString() ?? '0',
+              ),
+              _FactRow('Puck events', summary?.puckEvents.toString() ?? '0'),
+              _FactRow('Max steps', summary?.maxSteps?.toString() ?? '--'),
+              _FactRow(
+                'Last live sync',
+                summary?.lastLiveAt == null
+                    ? 'No live records'
+                    : _clock(summary!.lastLiveAt!),
+              ),
+            ],
+          ),
         ),
-        _Panel(
-          title: 'Step goal',
-          eyebrow: controller.stepGoalReached ? 'Reached' : 'Real IMU count',
+        const SizedBox(height: 18),
+        _SectionTitle('Sync state'),
+        _Surface(
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              LinearProgressIndicator(value: progress),
-              const SizedBox(height: 14),
-              _FactRow('Current', steps == null ? 'Waiting' : '$steps steps'),
-              _FactRow('Goal', '${controller.stepGoal} steps'),
-              const SizedBox(height: 10),
-              Wrap(
-                spacing: 8,
-                runSpacing: 8,
-                children: [
-                  for (final goal in const [10, 100, 1000, 10000])
-                    ChoiceChip(
-                      label: Text('$goal'),
-                      selected: controller.stepGoal == goal,
-                      onSelected: (_) => controller.setStepGoal(goal),
-                    ),
-                ],
+              _ProgressLine(
+                value: summary?.hasData == true ? 1 : 0,
+                color: _blue,
+                label: 'Day data',
+                trailing: summary?.hasData == true ? 'present' : 'empty',
+              ),
+              const SizedBox(height: 12),
+              _ProgressLine(
+                value: controller.phase == ConnectionPhase.streaming ? 1 : 0,
+                color: _mint,
+                label: 'Current link',
+                trailing: controller.phase.label,
+              ),
+              const SizedBox(height: 16),
+              Text(
+                'After a connection gap, the app stores new live records and requests backfill. Backfill is still a gap marker until firmware history storage is added.',
+                style: const TextStyle(color: _muted, height: 1.35),
               ),
             ],
           ),
         ),
-        _Panel(
-          title: 'Motion sample',
-          eyebrow: 'Accelerometer',
-          child: Column(
-            children: [
-              _FactRow(
-                'Magnitude',
-                live?.accelMilliG == null
-                    ? 'Waiting'
-                    : '${live!.accelMilliG} mg',
-              ),
-              _FactRow('IMU status', live?.motionLabel ?? 'Waiting'),
-              _FactRow('Live packets', controller.livePacketCount.toString()),
-              _FactRow(
-                'Last packet',
-                live == null ? 'Waiting' : _clock(live.receivedAt),
-              ),
-            ],
-          ),
-        ),
-        const _UnavailablePage(
-          icon: Icons.speed_rounded,
-          title: 'Strain unavailable',
-          body:
-              'Requires validated HR and motion processing before strain is calculated.',
+        const SizedBox(height: 18),
+        _SectionTitle('Not computed yet'),
+        _MetricStrip(
+          items: const [
+            _StripItem(
+              icon: Icons.bedtime_rounded,
+              label: 'Sleep',
+              value: 'Needs overnight data',
+            ),
+            _StripItem(
+              icon: Icons.favorite_rounded,
+              label: 'Recovery',
+              value: 'Needs HR/IBI',
+            ),
+            _StripItem(
+              icon: Icons.speed_rounded,
+              label: 'Strain',
+              value: 'Needs validated HR',
+            ),
+          ],
         ),
       ],
     );
   }
 }
 
-class DevicePage extends StatelessWidget {
-  const DevicePage({super.key, required this.controller});
+class DeviceView extends StatelessWidget {
+  const DeviceView({super.key, required this.controller});
 
   final OpenPulseController controller;
 
   @override
   Widget build(BuildContext context) {
     final puck = controller.latestPuckStatus;
-    return _Grid(
+    final battery = controller.latestBattery;
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        _Panel(
-          title: controller.phase.label,
-          eyebrow: controller.deviceName ?? 'OpenPulse device',
-          trailing: IconButton(
-            tooltip: 'Reconnect',
-            onPressed: controller.scanAndConnect,
-            icon: const Icon(Icons.refresh_rounded),
-          ),
+        _Surface(
           child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              Center(child: DeviceSilhouette(attached: puck?.attached == true)),
-              const SizedBox(height: 18),
-              _FactRow('GATT', controller.gattReady ? 'Ready' : 'Unavailable'),
+              _FactRow('GATT', controller.gattReady ? 'Ready' : 'Waiting'),
               _FactRow(
-                'OpenPulse',
-                controller.customServiceReady ? 'Ready' : 'Unavailable',
-              ),
-              _FactRow(
-                'Battery',
-                controller.batteryServiceReady ? 'Ready' : 'Unavailable',
-              ),
-              _FactRow(
-                'Control notify',
-                controller.controlNotifyReady ? 'Ready' : 'Unavailable',
-              ),
-              _FactRow(
-                'Bulk backfill',
-                controller.bulkBackfillReady ? 'Ready' : 'Unavailable',
-              ),
-              _FactRow(
-                'Raw PPG',
-                controller.rawPpgReady ? 'Ready' : 'Unavailable',
-              ),
-              _FactRow(
-                'Notifications',
-                controller.notificationPermissionGranted
-                    ? 'Ready'
-                    : 'Needs permission',
-              ),
-              _FactRow(
-                'Steps',
-                controller.latestLiveRecord?.stepCount?.toString() ?? 'Waiting',
+                'OpenPulse BLE',
+                controller.customServiceReady ? 'Ready' : 'Waiting',
               ),
               _FactRow(
                 'Puck',
                 puck == null
-                    ? 'Unavailable'
-                    : '${puck.eventLabel} / ${puck.sensorLabel}',
+                    ? 'Waiting'
+                    : puck.attached
+                    ? 'Attached'
+                    : puck.sensorLabel,
+              ),
+              _FactRow('Battery', battery?.display ?? 'Unavailable'),
+              _FactRow(
+                'Notifications',
+                controller.notificationPermissionGranted
+                    ? 'Allowed'
+                    : 'Needs permission',
               ),
             ],
           ),
         ),
-        _Panel(
-          title: 'Hardware',
-          eyebrow: 'Device information',
-          child: Column(
-            children: [
-              _FactRow(
-                'Manufacturer',
-                controller.deviceInformation.manufacturer ?? 'Unavailable',
-              ),
-              _FactRow(
-                'Model',
-                controller.deviceInformation.model ?? 'Unavailable',
-              ),
-              _FactRow(
-                'Firmware',
-                controller.deviceInformation.firmware ?? 'Unavailable',
-              ),
-              _FactRow(
-                'Hardware',
-                controller.deviceInformation.hardware ?? 'Unavailable',
-              ),
-            ],
-          ),
-        ),
-        _Panel(
-          title: 'Mode',
-          eyebrow: 'Control characteristic',
-          child: Wrap(
-            spacing: 8,
-            runSpacing: 8,
-            children: [
-              for (final mode in DeviceMode.values)
-                ChoiceChip(
-                  label: Text(mode.label),
-                  selected: controller.selectedMode == mode,
-                  onSelected: controller.customServiceReady
-                      ? (_) => controller.writeMode(mode)
-                      : null,
-                ),
-            ],
-          ),
-        ),
-        _Panel(
-          title: 'PPG controls',
-          eyebrow: 'Hardware writes',
+        const SizedBox(height: 18),
+        _SectionTitle('PPG controls'),
+        _Surface(
           child: Column(
             children: [
               _SliderRow(
@@ -754,58 +675,52 @@ class DevicePage extends StatelessWidget {
                       )
                     : null,
               ),
+              const SizedBox(height: 10),
+              Row(
+                children: [
+                  Expanded(
+                    child: OutlinedButton.icon(
+                      onPressed: controller.customServiceReady
+                          ? controller.requestRawPpgWindow
+                          : null,
+                      icon: const Icon(Icons.show_chart_rounded),
+                      label: const Text('Raw PPG'),
+                    ),
+                  ),
+                  const SizedBox(width: 10),
+                  Expanded(
+                    child: OutlinedButton.icon(
+                      onPressed: controller.customServiceReady
+                          ? controller.requestBackfill
+                          : null,
+                      icon: const Icon(Icons.sync_rounded),
+                      label: const Text('Backfill'),
+                    ),
+                  ),
+                ],
+              ),
             ],
           ),
         ),
-        _Panel(
-          title: 'Data',
-          eyebrow: controller.storageReady
-              ? 'SQLite local'
-              : 'Storage unavailable',
-          child: Wrap(
-            spacing: 10,
-            runSpacing: 10,
+        const SizedBox(height: 18),
+        _SectionTitle('Device information'),
+        _Surface(
+          child: Column(
             children: [
-              _MiniStatus(
-                label: 'Control ACK',
-                value: controller.latestControlAck == null
-                    ? 'Unavailable'
-                    : '${controller.latestControlAck!.commandLabel} / ${controller.latestControlAck!.statusLabel}',
+              _FactRow('Name', controller.deviceName ?? 'OpenPulse'),
+              _FactRow(
+                'Firmware',
+                controller.deviceInformation.firmware ?? 'Unavailable',
               ),
-              _MiniStatus(
-                label: 'Backfill',
-                value: controller.latestBackfillFrame == null
-                    ? 'Unavailable'
-                    : '${controller.latestBackfillFrame!.kindLabel} #${controller.latestBackfillFrame!.sequence}',
+              _FactRow(
+                'Hardware',
+                controller.deviceInformation.hardware ?? 'Unavailable',
               ),
-              _MiniStatus(
-                label: 'Raw PPG',
-                value: controller.latestRawPpgFrame == null
-                    ? 'Unavailable'
-                    : controller.latestRawPpgFrame!.payloadLength > 0
-                    ? '${controller.latestRawPpgFrame!.payloadLength} bytes'
-                    : controller.latestRawPpgFrame!.sensorLabel,
-              ),
-              OutlinedButton.icon(
-                onPressed: controller.customServiceReady
-                    ? controller.requestBackfill
-                    : null,
-                icon: const Icon(Icons.download_rounded),
-                label: const Text('Backfill'),
-              ),
-              OutlinedButton.icon(
-                onPressed: controller.customServiceReady
-                    ? controller.requestRawPpgWindow
-                    : null,
-                icon: const Icon(Icons.show_chart_rounded),
-                label: const Text('Raw PPG'),
-              ),
-              OutlinedButton.icon(
-                onPressed: controller.customServiceReady
-                    ? controller.enterShipMode
-                    : null,
-                icon: const Icon(Icons.power_settings_new_rounded),
-                label: const Text('Ship mode'),
+              _FactRow(
+                'Battery path',
+                battery?.available == true
+                    ? 'Standard BLE Battery'
+                    : 'ADC not mapped',
               ),
             ],
           ),
@@ -815,72 +730,42 @@ class DevicePage extends StatelessWidget {
   }
 }
 
-class _StatusCard extends StatelessWidget {
-  const _StatusCard({required this.controller});
+class _DateSwitcher extends StatelessWidget {
+  const _DateSwitcher({required this.controller});
 
   final OpenPulseController controller;
 
   @override
   Widget build(BuildContext context) {
-    return _Panel(
-      title: controller.phase.label,
-      eyebrow: 'Connection',
-      trailing: _Dot(live: controller.phase == ConnectionPhase.streaming),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Text(
-            controller.statusMessage,
-            style: const TextStyle(color: _muted, fontSize: 15),
-          ),
-          const SizedBox(height: 18),
-          Wrap(
-            spacing: 8,
-            runSpacing: 8,
-            children: [
-              _StatusChip(label: 'Storage', active: controller.storageReady),
-              _StatusChip(label: 'GATT', active: controller.gattReady),
-              _StatusChip(
-                label: 'Custom BLE',
-                active: controller.customServiceReady,
-              ),
-              _StatusChip(
-                label: 'Battery',
-                active: controller.batteryServiceReady,
-              ),
-            ],
-          ),
-        ],
+    return Container(
+      height: 56,
+      decoration: BoxDecoration(
+        color: _surface,
+        borderRadius: BorderRadius.circular(28),
+        border: Border.all(color: _line),
       ),
-    );
-  }
-}
-
-class _UnavailablePage extends StatelessWidget {
-  const _UnavailablePage({
-    required this.icon,
-    required this.title,
-    required this.body,
-  });
-
-  final IconData icon;
-  final String title;
-  final String body;
-
-  @override
-  Widget build(BuildContext context) {
-    return _Panel(
-      title: title,
-      eyebrow: 'Real data only',
       child: Row(
         children: [
-          Icon(icon, color: _muted, size: 36),
-          const SizedBox(width: 16),
+          IconButton(
+            onPressed: controller.selectPreviousDay,
+            icon: const Icon(Icons.chevron_left_rounded),
+          ),
           Expanded(
-            child: Text(
-              body,
-              style: const TextStyle(color: _muted, fontSize: 16),
+            child: Center(
+              child: Text(
+                _dayLabel(controller.selectedDay),
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: const TextStyle(
+                  fontWeight: FontWeight.w900,
+                  letterSpacing: 1.2,
+                ),
+              ),
             ),
+          ),
+          IconButton(
+            onPressed: controller.selectNextDay,
+            icon: const Icon(Icons.chevron_right_rounded),
           ),
         ],
       ),
@@ -888,88 +773,32 @@ class _UnavailablePage extends StatelessWidget {
   }
 }
 
-class _Grid extends StatelessWidget {
-  const _Grid({required this.children});
-
-  final List<Widget> children;
-
-  @override
-  Widget build(BuildContext context) {
-    return LayoutBuilder(
-      builder: (context, constraints) {
-        final width = constraints.maxWidth;
-        final columns = width >= 980 ? 2 : 1;
-        return GridView.count(
-          crossAxisCount: columns,
-          crossAxisSpacing: 12,
-          mainAxisSpacing: 12,
-          shrinkWrap: true,
-          physics: const NeverScrollableScrollPhysics(),
-          childAspectRatio: columns == 1 ? 1.08 : 1.35,
-          children: children,
-        );
-      },
-    );
-  }
-}
-
-class _Panel extends StatelessWidget {
-  const _Panel({
-    required this.title,
-    required this.eyebrow,
-    required this.child,
-    this.trailing,
+class _BottomNav extends StatelessWidget {
+  const _BottomNav({
+    required this.selectedIndex,
+    required this.tabs,
+    required this.onSelected,
   });
 
-  final String title;
-  final String eyebrow;
-  final Widget child;
-  final Widget? trailing;
+  final int selectedIndex;
+  final List<(IconData, String)> tabs;
+  final ValueChanged<int> onSelected;
 
   @override
   Widget build(BuildContext context) {
-    return Card(
-      child: Padding(
-        padding: const EdgeInsets.all(16),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Row(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Expanded(
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Text(
-                        eyebrow.toUpperCase(),
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
-                        style: const TextStyle(
-                          color: _muted,
-                          fontSize: 11,
-                          fontWeight: FontWeight.w800,
-                        ),
-                      ),
-                      const SizedBox(height: 4),
-                      Text(
-                        title,
-                        maxLines: 2,
-                        overflow: TextOverflow.ellipsis,
-                        style: const TextStyle(
-                          fontWeight: FontWeight.w800,
-                          fontSize: 20,
-                          height: 1.05,
-                        ),
-                      ),
-                    ],
-                  ),
-                ),
-                ?trailing,
-              ],
-            ),
-            const SizedBox(height: 16),
-            Expanded(child: child),
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(18, 0, 18, 18),
+      child: ClipRRect(
+        borderRadius: BorderRadius.circular(28),
+        child: NavigationBar(
+          selectedIndex: selectedIndex,
+          onDestinationSelected: onSelected,
+          height: 72,
+          backgroundColor: const Color(0xee1b252a),
+          indicatorColor: _surface2,
+          destinations: [
+            for (final tab in tabs)
+              NavigationDestination(icon: Icon(tab.$1), label: tab.$2),
           ],
         ),
       ),
@@ -977,45 +806,120 @@ class _Panel extends StatelessWidget {
   }
 }
 
-class _MetricCard extends StatelessWidget {
-  const _MetricCard({
-    required this.icon,
-    required this.title,
+class _Surface extends StatelessWidget {
+  const _Surface({required this.child});
+
+  final Widget child;
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.all(18),
+      decoration: BoxDecoration(
+        color: _surface,
+        borderRadius: BorderRadius.circular(24),
+        border: Border.all(color: _line),
+      ),
+      child: child,
+    );
+  }
+}
+
+class _SectionTitle extends StatelessWidget {
+  const _SectionTitle(this.text);
+
+  final String text;
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 10),
+      child: Text(
+        text,
+        style: const TextStyle(fontSize: 24, fontWeight: FontWeight.w900),
+      ),
+    );
+  }
+}
+
+class _RingRow extends StatelessWidget {
+  const _RingRow({required this.children});
+
+  final List<Widget> children;
+
+  @override
+  Widget build(BuildContext context) {
+    return SingleChildScrollView(
+      scrollDirection: Axis.horizontal,
+      child: Row(
+        children: [
+          for (final child in children) ...[child, const SizedBox(width: 14)],
+        ],
+      ),
+    );
+  }
+}
+
+class _MetricRing extends StatelessWidget {
+  const _MetricRing({
+    required this.label,
     required this.value,
     required this.footer,
+    required this.progress,
     required this.color,
   });
 
-  final IconData icon;
-  final String title;
+  final String label;
   final String value;
   final String footer;
+  final double progress;
   final Color color;
 
   @override
   Widget build(BuildContext context) {
-    return _Panel(
-      title: title,
-      eyebrow: 'Current',
-      trailing: Icon(icon, color: color),
+    return SizedBox(
+      width: 142,
       child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        mainAxisAlignment: MainAxisAlignment.end,
         children: [
-          FittedBox(
-            fit: BoxFit.scaleDown,
-            alignment: Alignment.centerLeft,
-            child: Text(
-              value,
-              style: const TextStyle(fontSize: 34, fontWeight: FontWeight.w900),
+          SizedBox(
+            width: 132,
+            height: 132,
+            child: CustomPaint(
+              painter: _RingPainter(progress: progress, color: color),
+              child: Center(
+                child: Padding(
+                  padding: const EdgeInsets.symmetric(horizontal: 12),
+                  child: FittedBox(
+                    fit: BoxFit.scaleDown,
+                    child: Text(
+                      value,
+                      style: const TextStyle(
+                        fontSize: 30,
+                        fontWeight: FontWeight.w900,
+                      ),
+                    ),
+                  ),
+                ),
+              ),
             ),
           ),
           const SizedBox(height: 8),
           Text(
-            footer,
-            maxLines: 2,
+            label.toUpperCase(),
+            maxLines: 1,
             overflow: TextOverflow.ellipsis,
-            style: const TextStyle(color: _muted),
+            style: const TextStyle(
+              fontWeight: FontWeight.w900,
+              letterSpacing: 1.4,
+            ),
+          ),
+          const SizedBox(height: 2),
+          Text(
+            footer,
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+            style: const TextStyle(color: _muted, fontSize: 12),
           ),
         ],
       ),
@@ -1023,54 +927,176 @@ class _MetricCard extends StatelessWidget {
   }
 }
 
-class _MetricTile extends StatelessWidget {
-  const _MetricTile({
-    required this.label,
+class _RingPainter extends CustomPainter {
+  const _RingPainter({required this.progress, required this.color});
+
+  final double progress;
+  final Color color;
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final rect = Offset.zero & size;
+    final stroke = size.shortestSide * 0.1;
+    final paint = Paint()
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = stroke
+      ..strokeCap = StrokeCap.round
+      ..color = _line;
+    canvas.drawArc(
+      rect.deflate(stroke / 2),
+      -math.pi / 2,
+      math.pi * 2,
+      false,
+      paint,
+    );
+    paint.color = color;
+    canvas.drawArc(
+      rect.deflate(stroke / 2),
+      -math.pi / 2,
+      math.pi * 2 * progress.clamp(0.0, 1.0),
+      false,
+      paint,
+    );
+  }
+
+  @override
+  bool shouldRepaint(covariant _RingPainter oldDelegate) {
+    return oldDelegate.progress != progress || oldDelegate.color != color;
+  }
+}
+
+class _ProgressLine extends StatelessWidget {
+  const _ProgressLine({
     required this.value,
-    required this.unit,
+    required this.color,
+    required this.label,
+    required this.trailing,
   });
 
+  final double value;
+  final Color color;
+  final String label;
+  final String trailing;
+
+  @override
+  Widget build(BuildContext context) {
+    return Column(
+      children: [
+        Row(
+          children: [
+            Expanded(
+              child: Text(label, style: const TextStyle(color: _muted)),
+            ),
+            Text(trailing, style: const TextStyle(fontWeight: FontWeight.w800)),
+          ],
+        ),
+        const SizedBox(height: 8),
+        ClipRRect(
+          borderRadius: BorderRadius.circular(8),
+          child: LinearProgressIndicator(
+            minHeight: 10,
+            value: value.clamp(0.0, 1.0),
+            backgroundColor: _surface2,
+            valueColor: AlwaysStoppedAnimation<Color>(color),
+          ),
+        ),
+      ],
+    );
+  }
+}
+
+class _MetricStrip extends StatelessWidget {
+  const _MetricStrip({required this.items});
+
+  final List<_StripItem> items;
+
+  @override
+  Widget build(BuildContext context) {
+    return Wrap(
+      spacing: 12,
+      runSpacing: 12,
+      children: [
+        for (final item in items)
+          SizedBox(
+            width: (MediaQuery.sizeOf(context).width - 48) / 2,
+            child: item,
+          ),
+      ],
+    );
+  }
+}
+
+class _StripItem extends StatelessWidget {
+  const _StripItem({
+    required this.icon,
+    required this.label,
+    required this.value,
+  });
+
+  final IconData icon;
   final String label;
   final String value;
-  final String unit;
+
+  @override
+  Widget build(BuildContext context) {
+    return ConstrainedBox(
+      constraints: const BoxConstraints(minHeight: 96),
+      child: Container(
+        padding: const EdgeInsets.all(16),
+        decoration: BoxDecoration(
+          color: _surface,
+          borderRadius: BorderRadius.circular(22),
+          border: Border.all(color: _line),
+        ),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Icon(icon, color: _blue),
+            const SizedBox(height: 18),
+            Text(label, style: const TextStyle(color: _muted, fontSize: 12)),
+            const SizedBox(height: 4),
+            Text(
+              value,
+              maxLines: 2,
+              overflow: TextOverflow.ellipsis,
+              style: const TextStyle(fontWeight: FontWeight.w900, fontSize: 16),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _StatusPill extends StatelessWidget {
+  const _StatusPill({
+    required this.icon,
+    required this.label,
+    required this.color,
+  });
+
+  final IconData icon;
+  final String label;
+  final Color color;
 
   @override
   Widget build(BuildContext context) {
     return Container(
-      width: 132,
-      height: 92,
-      padding: const EdgeInsets.all(12),
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
       decoration: BoxDecoration(
-        color: const Color(0xfff2f4f8),
-        borderRadius: BorderRadius.circular(8),
+        color: _surface,
+        borderRadius: BorderRadius.circular(22),
+        border: Border.all(color: _line),
       ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
         children: [
-          Text(label, style: const TextStyle(color: _muted, fontSize: 12)),
-          const Spacer(),
-          FittedBox(
-            fit: BoxFit.scaleDown,
-            alignment: Alignment.centerLeft,
-            child: Row(
-              crossAxisAlignment: CrossAxisAlignment.end,
-              children: [
-                Text(
-                  value,
-                  style: const TextStyle(
-                    fontWeight: FontWeight.w900,
-                    fontSize: 22,
-                  ),
-                ),
-                if (unit.isNotEmpty) ...[
-                  const SizedBox(width: 4),
-                  Padding(
-                    padding: const EdgeInsets.only(bottom: 2),
-                    child: Text(unit, style: const TextStyle(color: _muted)),
-                  ),
-                ],
-              ],
-            ),
+          Icon(icon, color: color, size: 18),
+          const SizedBox(width: 6),
+          Text(
+            label,
+            style: const TextStyle(fontWeight: FontWeight.w800, fontSize: 12),
           ),
         ],
       ),
@@ -1087,7 +1113,7 @@ class _FactRow extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return Padding(
-      padding: const EdgeInsets.symmetric(vertical: 7),
+      padding: const EdgeInsets.symmetric(vertical: 8),
       child: Row(
         children: [
           Expanded(
@@ -1098,72 +1124,10 @@ class _FactRow extends StatelessWidget {
               value,
               textAlign: TextAlign.right,
               overflow: TextOverflow.ellipsis,
-              style: const TextStyle(fontWeight: FontWeight.w800),
+              style: const TextStyle(fontWeight: FontWeight.w900),
             ),
           ),
         ],
-      ),
-    );
-  }
-}
-
-class _MiniStatus extends StatelessWidget {
-  const _MiniStatus({required this.label, required this.value});
-
-  final String label;
-  final String value;
-
-  @override
-  Widget build(BuildContext context) {
-    return Container(
-      width: 160,
-      padding: const EdgeInsets.all(10),
-      decoration: BoxDecoration(
-        color: const Color(0xfff2f4f8),
-        borderRadius: BorderRadius.circular(8),
-      ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          Text(label, style: const TextStyle(color: _muted, fontSize: 12)),
-          const SizedBox(height: 6),
-          Text(
-            value,
-            maxLines: 2,
-            overflow: TextOverflow.ellipsis,
-            style: const TextStyle(fontWeight: FontWeight.w800),
-          ),
-        ],
-      ),
-    );
-  }
-}
-
-class _HexBox extends StatelessWidget {
-  const _HexBox({required this.text});
-
-  final String text;
-
-  @override
-  Widget build(BuildContext context) {
-    return Container(
-      width: double.infinity,
-      padding: const EdgeInsets.all(10),
-      decoration: BoxDecoration(
-        color: const Color(0xfff2f4f8),
-        borderRadius: BorderRadius.circular(8),
-      ),
-      child: SingleChildScrollView(
-        child: SelectableText(
-          text,
-          style: const TextStyle(
-            color: _ink,
-            fontFamily: 'Helvetica',
-            fontSize: 12,
-            height: 1.35,
-          ),
-        ),
       ),
     );
   }
@@ -1190,105 +1154,30 @@ class _SliderRow extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return Column(
-      children: [
-        Row(
-          children: [
-            Expanded(child: Text(label)),
-            Text('${value.round()} $suffix'),
-          ],
-        ),
-        Slider(
-          value: value.clamp(min, max),
-          min: min,
-          max: max,
-          divisions: divisions,
-          onChanged: onChanged,
-        ),
-      ],
-    );
-  }
-}
-
-class _StatusChip extends StatelessWidget {
-  const _StatusChip({required this.label, required this.active});
-
-  final String label;
-  final bool active;
-
-  @override
-  Widget build(BuildContext context) {
-    return Chip(
-      avatar: Icon(
-        active ? Icons.check_circle_rounded : Icons.remove_circle_outline,
-        size: 18,
-        color: active ? _green : _muted,
-      ),
-      label: Text(label),
-      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
-    );
-  }
-}
-
-class DeviceSilhouette extends StatelessWidget {
-  const DeviceSilhouette({super.key, required this.attached});
-
-  final bool attached;
-
-  @override
-  Widget build(BuildContext context) {
-    return SizedBox(
-      width: 96,
-      height: 148,
-      child: Stack(
-        alignment: Alignment.center,
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 14),
+      child: Column(
         children: [
-          Positioned(
-            top: 0,
-            child: Container(
-              width: 42,
-              height: 44,
-              decoration: BoxDecoration(
-                color: _ink.withValues(alpha: 0.12),
-                borderRadius: BorderRadius.circular(8),
-              ),
-            ),
-          ),
-          Positioned(
-            bottom: 0,
-            child: Container(
-              width: 42,
-              height: 44,
-              decoration: BoxDecoration(
-                color: _ink.withValues(alpha: 0.12),
-                borderRadius: BorderRadius.circular(8),
-              ),
-            ),
-          ),
-          Container(
-            width: 72,
-            height: 86,
-            decoration: BoxDecoration(
-              color: _ink,
-              borderRadius: BorderRadius.circular(8),
-              boxShadow: [
-                BoxShadow(
-                  blurRadius: 18,
-                  color: _ink.withValues(alpha: 0.16),
-                  offset: const Offset(0, 10),
-                ),
-              ],
-            ),
-            child: Center(
-              child: Container(
-                width: attached ? 34 : 18,
-                height: attached ? 34 : 18,
-                decoration: BoxDecoration(
-                  color: attached ? _brand : _muted,
-                  borderRadius: BorderRadius.circular(8),
+          Row(
+            children: [
+              Expanded(
+                child: Text(
+                  label,
+                  style: const TextStyle(fontWeight: FontWeight.w800),
                 ),
               ),
-            ),
+              Text(
+                '${value.round()} $suffix',
+                style: const TextStyle(color: _muted),
+              ),
+            ],
+          ),
+          Slider(
+            value: value.clamp(min, max),
+            min: min,
+            max: max,
+            divisions: divisions,
+            onChanged: onChanged,
           ),
         ],
       ),
@@ -1296,67 +1185,212 @@ class DeviceSilhouette extends StatelessWidget {
   }
 }
 
-class _Dot extends StatelessWidget {
-  const _Dot({required this.live});
+class _PpgPlot extends StatelessWidget {
+  const _PpgPlot({required this.samples, this.fallback = const []});
 
-  final bool live;
+  final List<int> samples;
+  final List<int> fallback;
 
   @override
   Widget build(BuildContext context) {
-    return Container(
-      width: 12,
-      height: 12,
-      decoration: BoxDecoration(
-        color: live ? _green : _muted,
-        shape: BoxShape.circle,
+    final values = samples.isNotEmpty ? samples : fallback;
+    return CustomPaint(
+      painter: _LinePlotPainter(
+        values: values,
+        color: samples.isNotEmpty ? _red : _mint,
+        emptyLabel: samples.isNotEmpty ? '' : 'Waiting for PPG FIFO samples',
       ),
+      child: const SizedBox.expand(),
     );
   }
 }
 
-class _BrandMark extends StatelessWidget {
-  const _BrandMark();
+class _LinePlot extends StatelessWidget {
+  const _LinePlot({
+    required this.values,
+    required this.color,
+    required this.emptyLabel,
+  });
+
+  final List<int> values;
+  final Color color;
+  final String emptyLabel;
+
+  @override
+  Widget build(BuildContext context) {
+    return CustomPaint(
+      painter: _LinePlotPainter(
+        values: values,
+        color: color,
+        emptyLabel: emptyLabel,
+      ),
+      child: const SizedBox.expand(),
+    );
+  }
+}
+
+class _LinePlotPainter extends CustomPainter {
+  const _LinePlotPainter({
+    required this.values,
+    required this.color,
+    required this.emptyLabel,
+  });
+
+  final List<int> values;
+  final Color color;
+  final String emptyLabel;
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final gridPaint = Paint()
+      ..color = _line
+      ..strokeWidth = 1;
+    for (var i = 1; i < 4; i++) {
+      final y = size.height * i / 4;
+      canvas.drawLine(Offset(0, y), Offset(size.width, y), gridPaint);
+    }
+
+    if (values.length < 2) {
+      final textPainter = TextPainter(
+        text: TextSpan(
+          text: emptyLabel,
+          style: const TextStyle(color: _muted, fontSize: 14),
+        ),
+        textDirection: TextDirection.ltr,
+      )..layout(maxWidth: size.width);
+      textPainter.paint(
+        canvas,
+        Offset(
+          (size.width - textPainter.width) / 2,
+          (size.height - textPainter.height) / 2,
+        ),
+      );
+      return;
+    }
+
+    final minValue = values.reduce(math.min).toDouble();
+    final maxValue = values.reduce(math.max).toDouble();
+    final span = math.max(1.0, maxValue - minValue);
+    final path = Path();
+    for (var i = 0; i < values.length; i++) {
+      final x = size.width * i / (values.length - 1);
+      final normalized = (values[i] - minValue) / span;
+      final y = size.height - (normalized * size.height);
+      if (i == 0) {
+        path.moveTo(x, y);
+      } else {
+        path.lineTo(x, y);
+      }
+    }
+
+    final fill = Path.from(path)
+      ..lineTo(size.width, size.height)
+      ..lineTo(0, size.height)
+      ..close();
+    final fillPaint = Paint()
+      ..shader = LinearGradient(
+        begin: Alignment.topCenter,
+        end: Alignment.bottomCenter,
+        colors: [color.withValues(alpha: 0.28), color.withValues(alpha: 0.02)],
+      ).createShader(Offset.zero & size);
+    canvas.drawPath(fill, fillPaint);
+    canvas.drawPath(
+      path,
+      Paint()
+        ..color = color
+        ..strokeWidth = 3
+        ..strokeCap = StrokeCap.round
+        ..style = PaintingStyle.stroke,
+    );
+  }
+
+  @override
+  bool shouldRepaint(covariant _LinePlotPainter oldDelegate) {
+    return oldDelegate.values != values ||
+        oldDelegate.color != color ||
+        oldDelegate.emptyLabel != emptyLabel;
+  }
+}
+
+class _HexBox extends StatelessWidget {
+  const _HexBox({required this.text});
+
+  final String text;
 
   @override
   Widget build(BuildContext context) {
     return Container(
-      width: 44,
-      height: 44,
-      margin: const EdgeInsets.only(bottom: 12),
-      alignment: Alignment.center,
+      width: double.infinity,
+      padding: const EdgeInsets.all(12),
       decoration: BoxDecoration(
-        color: _ink,
-        borderRadius: BorderRadius.circular(8),
+        color: _surface2,
+        borderRadius: BorderRadius.circular(16),
       ),
-      child: const Text(
-        'OP',
-        style: TextStyle(
-          color: Colors.white,
-          fontWeight: FontWeight.w900,
-          fontSize: 14,
+      child: SelectableText(
+        text,
+        style: const TextStyle(
+          color: _muted,
+          fontFamily: 'Helvetica',
+          fontSize: 12,
+          height: 1.35,
         ),
       ),
     );
   }
 }
 
-String _shortDate(DateTime date) {
-  const weekdays = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
-  const months = [
-    'Jan',
-    'Feb',
-    'Mar',
-    'Apr',
-    'May',
-    'Jun',
-    'Jul',
-    'Aug',
-    'Sep',
-    'Oct',
-    'Nov',
-    'Dec',
-  ];
-  return '${weekdays[date.weekday - 1]} ${date.day} ${months[date.month - 1]}';
+class _LogoMark extends StatelessWidget {
+  const _LogoMark({required this.size});
+
+  final double size;
+
+  @override
+  Widget build(BuildContext context) {
+    return SizedBox(
+      width: size,
+      height: size,
+      child: CustomPaint(painter: const _LogoPainter()),
+    );
+  }
+}
+
+class _LogoPainter extends CustomPainter {
+  const _LogoPainter();
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final stroke = size.shortestSide * 0.12;
+    final rect = Offset.zero & size;
+    void arc(Color color, double start, double sweep) {
+      final paint = Paint()
+        ..style = PaintingStyle.stroke
+        ..strokeWidth = stroke
+        ..strokeCap = StrokeCap.round
+        ..color = color;
+      canvas.drawArc(rect.deflate(stroke * 1.15), start, sweep, false, paint);
+    }
+
+    arc(_navy, math.pi * 0.92, math.pi * 0.8);
+    arc(_blush, math.pi * 1.82, math.pi * 0.62);
+    arc(_red, math.pi * 0.35, math.pi * 0.82);
+
+    void dot(Color color, double angle) {
+      final radius = size.shortestSide / 2 - stroke * 1.15;
+      final center = Offset(size.width / 2, size.height / 2);
+      final dotCenter = Offset(
+        center.dx + math.cos(angle) * radius,
+        center.dy + math.sin(angle) * radius,
+      );
+      canvas.drawCircle(dotCenter, stroke * 0.62, Paint()..color = color);
+    }
+
+    dot(_navy, math.pi * 1.72);
+    dot(_blush, math.pi * 0.42);
+    dot(_red, math.pi * 0.98);
+  }
+
+  @override
+  bool shouldRepaint(covariant CustomPainter oldDelegate) => false;
 }
 
 String _clock(DateTime date) {
@@ -1366,12 +1400,47 @@ String _clock(DateTime date) {
   return '$hour:$minute:$second';
 }
 
+String _dayLabel(DateTime date) {
+  final today = DateTime.now();
+  final normalized = DateTime(date.year, date.month, date.day);
+  final normalizedToday = DateTime(today.year, today.month, today.day);
+  if (normalized == normalizedToday) {
+    return 'TODAY';
+  }
+  const months = [
+    'JAN',
+    'FEB',
+    'MAR',
+    'APR',
+    'MAY',
+    'JUN',
+    'JUL',
+    'AUG',
+    'SEP',
+    'OCT',
+    'NOV',
+    'DEC',
+  ];
+  return '${date.day} ${months[date.month - 1]}';
+}
+
+String _timeAgo(DateTime date) {
+  final diff = DateTime.now().difference(date);
+  if (diff.inSeconds < 60) {
+    return '${diff.inSeconds}s ago';
+  }
+  if (diff.inMinutes < 60) {
+    return '${diff.inMinutes}m ago';
+  }
+  return _clock(date);
+}
+
 String _hexPreview(String? hex) {
   if (hex == null || hex.isEmpty) {
     return 'Waiting for live packet bytes';
   }
-  if (hex.length <= 160) {
+  if (hex.length <= 220) {
     return hex;
   }
-  return '${hex.substring(0, 160)}...';
+  return '${hex.substring(0, 220)}...';
 }

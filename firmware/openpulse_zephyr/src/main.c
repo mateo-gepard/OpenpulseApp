@@ -51,6 +51,14 @@ LOG_MODULE_REGISTER(openpulse, LOG_LEVEL_INF);
 #define MAXM86161_SYSTEM_SINGLE_PPG BIT(3)
 #define MAXM86161_SYSTEM_LOW_POWER BIT(2)
 
+#define LSM6DSL_I2C_ADDR 0x6a
+#define LSM6DSL_REG_CTRL10_C 0x19
+#define LSM6DSL_REG_STEP_COUNTER_L 0x4b
+#define LSM6DSL_REG_STEP_COUNTER_H 0x4c
+#define LSM6DSL_CTRL10_C_PEDO_EN BIT(4)
+#define LSM6DSL_CTRL10_C_FUNC_EN BIT(2)
+#define LSM6DSL_CTRL10_C_PEDO_RST_STEP BIT(1)
+
 #define OP_FRAME_LIVE 0x10
 #define OP_FRAME_BACKFILL 0x20
 #define OP_FRAME_RAW_PPG 0x30
@@ -70,14 +78,14 @@ LOG_MODULE_REGISTER(openpulse, LOG_LEVEL_INF);
 #define OP_SENSOR_STATUS_UNEXPECTED_PART_ID 3
 #define OP_MOTION_STATUS_OK 0
 #define OP_MOTION_STATUS_UNAVAILABLE 1
-#define OP_STEP_ARM_THRESHOLD_MG 90
-#define OP_STEP_TRIGGER_THRESHOLD_MG 180
-#define OP_STEP_REFRACTORY_MS 300
+#define OP_MOTION_STATUS_PEDOMETER_UNAVAILABLE 2
 
 #define OP_QUALITY_SKIN_CONTACT BIT(0)
 #define OP_QUALITY_LOW_PERFUSION BIT(2)
 #define OP_QUALITY_PUCK_CHANGED BIT(3)
 #define OP_QUALITY_BATTERY_LOW BIT(4)
+#define OP_BATTERY_DIVIDER_NUM 3
+#define OP_BATTERY_DIVIDER_DEN 1
 
 enum op_mode {
 	OP_MODE_STANDBY = 0,
@@ -120,8 +128,9 @@ static bool imu_ready;
 static int16_t latest_accel_milli_g;
 static uint32_t step_count;
 static uint8_t motion_status = OP_MOTION_STATUS_UNAVAILABLE;
-static bool step_peak_armed = true;
-static int64_t last_step_ms;
+static bool lsm6dsl_pedometer_ready;
+static bool lsm6dsl_step_baseline_ready;
+static uint16_t lsm6dsl_last_step_counter;
 
 static uint8_t battery_level = 0xff;
 static bool battery_level_known;
@@ -960,23 +969,108 @@ static int32_t sensor_value_to_milli_g(const struct sensor_value *value)
 	return (int32_t)((micro_ms2 * 1000LL) / 9806650LL);
 }
 
-static void update_steps_from_accel(int16_t accel_milli_g)
+static int lsm6dsl_write_reg(uint8_t reg, uint8_t value)
 {
-	int32_t dynamic_mg = accel_milli_g >= 1000 ?
-			    accel_milli_g - 1000 : 1000 - accel_milli_g;
-	int64_t now_ms = k_uptime_get();
+#if OPENPULSE_HAS_IMU
+	return i2c_reg_write_byte(DEVICE_DT_GET(DT_BUS(DT_NODELABEL(lsm6ds3tr_c))),
+				  LSM6DSL_I2C_ADDR, reg, value);
+#else
+	ARG_UNUSED(reg);
+	ARG_UNUSED(value);
+	return -ENODEV;
+#endif
+}
 
-	if (dynamic_mg < OP_STEP_ARM_THRESHOLD_MG) {
-		step_peak_armed = true;
+static int lsm6dsl_read_reg(uint8_t reg, uint8_t *value)
+{
+#if OPENPULSE_HAS_IMU
+	return i2c_reg_read_byte(DEVICE_DT_GET(DT_BUS(DT_NODELABEL(lsm6ds3tr_c))),
+				 LSM6DSL_I2C_ADDR, reg, value);
+#else
+	ARG_UNUSED(reg);
+	ARG_UNUSED(value);
+	return -ENODEV;
+#endif
+}
+
+static int configure_lsm6dsl_pedometer(void)
+{
+#if OPENPULSE_HAS_IMU
+	uint8_t ctrl10;
+	int err;
+
+	err = lsm6dsl_read_reg(LSM6DSL_REG_CTRL10_C, &ctrl10);
+	if (err) {
+		return err;
 	}
 
-	if (step_peak_armed &&
-	    dynamic_mg > OP_STEP_TRIGGER_THRESHOLD_MG &&
-	    now_ms - last_step_ms > OP_STEP_REFRACTORY_MS) {
-		step_count++;
-		last_step_ms = now_ms;
-		step_peak_armed = false;
+	ctrl10 |= LSM6DSL_CTRL10_C_FUNC_EN | LSM6DSL_CTRL10_C_PEDO_EN;
+	ctrl10 |= LSM6DSL_CTRL10_C_PEDO_RST_STEP;
+	err = lsm6dsl_write_reg(LSM6DSL_REG_CTRL10_C, ctrl10);
+	if (err) {
+		return err;
 	}
+
+	k_sleep(K_MSEC(5));
+	ctrl10 &= ~LSM6DSL_CTRL10_C_PEDO_RST_STEP;
+	err = lsm6dsl_write_reg(LSM6DSL_REG_CTRL10_C, ctrl10);
+	if (err) {
+		return err;
+	}
+
+	step_count = 0;
+	lsm6dsl_step_baseline_ready = false;
+	lsm6dsl_last_step_counter = 0;
+	lsm6dsl_pedometer_ready = true;
+
+	return 0;
+#else
+	return -ENODEV;
+#endif
+}
+
+static int read_lsm6dsl_step_counter(uint16_t *counter)
+{
+#if OPENPULSE_HAS_IMU
+	uint8_t raw[2];
+	int err;
+
+	err = i2c_burst_read(DEVICE_DT_GET(DT_BUS(DT_NODELABEL(lsm6ds3tr_c))),
+			     LSM6DSL_I2C_ADDR,
+			     LSM6DSL_REG_STEP_COUNTER_L,
+			     raw,
+			     sizeof(raw));
+	if (err) {
+		return err;
+	}
+
+	*counter = sys_get_le16(raw);
+	return 0;
+#else
+	ARG_UNUSED(counter);
+	return -ENODEV;
+#endif
+}
+
+static void update_steps_from_lsm6dsl(void)
+{
+	uint16_t hardware_steps;
+
+	if (!lsm6dsl_pedometer_ready || read_lsm6dsl_step_counter(&hardware_steps)) {
+		motion_status = OP_MOTION_STATUS_PEDOMETER_UNAVAILABLE;
+		return;
+	}
+
+	if (!lsm6dsl_step_baseline_ready) {
+		lsm6dsl_last_step_counter = hardware_steps;
+		lsm6dsl_step_baseline_ready = true;
+		motion_status = OP_MOTION_STATUS_OK;
+		return;
+	}
+
+	step_count += (uint16_t)(hardware_steps - lsm6dsl_last_step_counter);
+	lsm6dsl_last_step_counter = hardware_steps;
+	motion_status = OP_MOTION_STATUS_OK;
 }
 
 static void configure_motion_sensor(void)
@@ -1002,8 +1096,13 @@ static void configure_motion_sensor(void)
 	}
 
 	imu_ready = true;
-	motion_status = OP_MOTION_STATUS_OK;
-	LOG_INF("LSM6DSL accelerometer ready for steps");
+	if (configure_lsm6dsl_pedometer()) {
+		motion_status = OP_MOTION_STATUS_PEDOMETER_UNAVAILABLE;
+		LOG_WRN("LSM6DSL hardware pedometer setup failed");
+	} else {
+		motion_status = OP_MOTION_STATUS_OK;
+		LOG_INF("LSM6DSL hardware pedometer ready for steps");
+	}
 #else
 	imu_ready = false;
 	motion_status = OP_MOTION_STATUS_UNAVAILABLE;
@@ -1051,8 +1150,7 @@ static void sample_motion(void)
 	}
 
 	latest_accel_milli_g = (int16_t)magnitude_mg;
-	motion_status = OP_MOTION_STATUS_OK;
-	update_steps_from_accel(latest_accel_milli_g);
+	update_steps_from_lsm6dsl();
 #else
 	motion_status = OP_MOTION_STATUS_UNAVAILABLE;
 	latest_accel_milli_g = 0;
@@ -1106,6 +1204,7 @@ static void read_battery(void)
 		return;
 	}
 
+	mv = (mv * OP_BATTERY_DIVIDER_NUM) / OP_BATTERY_DIVIDER_DEN;
 	battery_level = battery_soc_from_mv(mv);
 	battery_level_known = true;
 #else

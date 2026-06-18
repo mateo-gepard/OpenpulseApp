@@ -30,6 +30,10 @@ class OpenPulseController extends ChangeNotifier {
   int rawPpgPacketCount = 0;
   int latestLiveFrameByteCount = 0;
   String? latestLiveFrameHex;
+  List<LiveRecord> recentLiveRecords = const [];
+  List<int> recentRawPpgSamples = const [];
+  DateTime selectedDay = DateTime.now();
+  DaySummary? selectedDaySummary;
   DeviceMode selectedMode = DeviceMode.active;
   int samplingHz = 25;
   int ledGreenMa = 8;
@@ -92,6 +96,7 @@ class OpenPulseController extends ChangeNotifier {
     try {
       await storage.open();
       storageReady = true;
+      _refreshSelectedDay();
       try {
         await notifications.initialize();
         notificationsReady = notifications.ready;
@@ -227,6 +232,35 @@ class OpenPulseController extends ChangeNotifier {
     } else {
       _notifyStepGoalIfNeeded(steps);
     }
+    notifyListeners();
+  }
+
+  void selectPreviousDay() {
+    selectedDay = DateTime(
+      selectedDay.year,
+      selectedDay.month,
+      selectedDay.day - 1,
+    );
+    _refreshSelectedDay();
+    notifyListeners();
+  }
+
+  void selectNextDay() {
+    final today = DateTime.now();
+    final next = DateTime(
+      selectedDay.year,
+      selectedDay.month,
+      selectedDay.day + 1,
+    );
+    if (DateTime(
+      next.year,
+      next.month,
+      next.day,
+    ).isAfter(DateTime(today.year, today.month, today.day))) {
+      return;
+    }
+    selectedDay = next;
+    _refreshSelectedDay();
     notifyListeners();
   }
 
@@ -642,6 +676,11 @@ class OpenPulseController extends ChangeNotifier {
       latestLiveRecord = record;
       storage.insertLiveRecord(_sessionId, record);
     }
+    recentLiveRecords = [
+      ...recentLiveRecords,
+      ...parsed.records,
+    ].takeLast(90).toList(growable: false);
+    _refreshSelectedDay();
     final steps = latestLiveRecord?.stepCount;
     if (steps != null) {
       if (steps < stepGoal) {
@@ -672,6 +711,13 @@ class OpenPulseController extends ChangeNotifier {
     rawPpgPacketCount++;
     latestRawPpgFrame = frame;
     storage.insertRawPpgFrame(_sessionId, frame);
+    if (frame.samples.isNotEmpty) {
+      recentRawPpgSamples = [
+        ...recentRawPpgSamples,
+        ...frame.samples,
+      ].takeLast(160).toList(growable: false);
+    }
+    _refreshSelectedDay();
     statusMessage = frame.payloadLength > 0
         ? 'Raw PPG packet #${frame.sequence}: ${frame.payloadLength} bytes.'
         : 'Raw PPG packet #${frame.sequence}: ${frame.sensorLabel}.';
@@ -740,6 +786,8 @@ class OpenPulseController extends ChangeNotifier {
     rawPpgPacketCount = 0;
     latestLiveFrameByteCount = 0;
     latestLiveFrameHex = null;
+    recentLiveRecords = const [];
+    recentRawPpgSamples = const [];
     stepGoalNotified = false;
     latestLiveRecord = null;
     latestRawPpgFrame = null;
@@ -753,6 +801,13 @@ class OpenPulseController extends ChangeNotifier {
     phase = next;
     statusMessage = message;
     notifyListeners();
+  }
+
+  void _refreshSelectedDay() {
+    if (!storageReady) {
+      return;
+    }
+    selectedDaySummary = storage.fetchDaySummary(selectedDay);
   }
 
   void _notifyStepGoalIfNeeded(int steps) {
@@ -776,5 +831,15 @@ class OpenPulseController extends ChangeNotifier {
     storage.closeSession(_sessionId);
     storage.dispose();
     super.dispose();
+  }
+}
+
+extension _RecentWindow<T> on Iterable<T> {
+  Iterable<T> takeLast(int count) {
+    final list = toList(growable: false);
+    if (list.length <= count) {
+      return list;
+    }
+    return list.sublist(list.length - count);
   }
 }

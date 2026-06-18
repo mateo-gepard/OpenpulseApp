@@ -366,6 +366,60 @@ class OpenPulseStorage {
     );
   }
 
+  DaySummary fetchDaySummary(DateTime day) {
+    final db = _requireDb();
+    final start = DateTime(day.year, day.month, day.day);
+    final end = start.add(const Duration(days: 1));
+    final startMs = start.millisecondsSinceEpoch;
+    final endMs = end.millisecondsSinceEpoch;
+
+    int scalar(String sql) {
+      final rows = db.select(sql, [startMs, endMs]);
+      if (rows.isEmpty || rows.first.values.first == null) {
+        return 0;
+      }
+      return rows.first.values.first as int;
+    }
+
+    int? nullableInt(String sql) {
+      final rows = db.select(sql, [startMs, endMs]);
+      if (rows.isEmpty || rows.first.values.first == null) {
+        return null;
+      }
+      return rows.first.values.first as int;
+    }
+
+    DateTime? nullableDate(String sql) {
+      final ms = nullableInt(sql);
+      return ms == null ? null : DateTime.fromMillisecondsSinceEpoch(ms);
+    }
+
+    return DaySummary(
+      day: start,
+      liveRecords: scalar(
+        'SELECT COUNT(*) FROM live_records WHERE received_at_ms >= ? AND received_at_ms < ?',
+      ),
+      rawPpgFrames: scalar(
+        'SELECT COUNT(*) FROM raw_ppg_frames WHERE received_at_ms >= ? AND received_at_ms < ?',
+      ),
+      puckEvents: scalar(
+        'SELECT COUNT(*) FROM puck_events WHERE received_at_ms >= ? AND received_at_ms < ?',
+      ),
+      controlWrites: scalar(
+        'SELECT COUNT(*) FROM control_writes WHERE written_at_ms >= ? AND written_at_ms < ?',
+      ),
+      maxSteps: nullableInt(
+        'SELECT MAX(step_count) FROM live_records WHERE received_at_ms >= ? AND received_at_ms < ?',
+      ),
+      lastLiveAt: nullableDate(
+        'SELECT MAX(received_at_ms) FROM live_records WHERE received_at_ms >= ? AND received_at_ms < ?',
+      ),
+      lastRawAt: nullableDate(
+        'SELECT MAX(received_at_ms) FROM raw_ppg_frames WHERE received_at_ms >= ? AND received_at_ms < ?',
+      ),
+    );
+  }
+
   Database _requireDb() {
     final db = _db;
     if (db == null) {

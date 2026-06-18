@@ -76,6 +76,30 @@ class BatterySample {
   String get display => available && level != null ? '$level%' : 'Unavailable';
 }
 
+class DaySummary {
+  const DaySummary({
+    required this.day,
+    required this.liveRecords,
+    required this.rawPpgFrames,
+    required this.puckEvents,
+    required this.controlWrites,
+    required this.maxSteps,
+    required this.lastLiveAt,
+    required this.lastRawAt,
+  });
+
+  final DateTime day;
+  final int liveRecords;
+  final int rawPpgFrames;
+  final int puckEvents;
+  final int controlWrites;
+  final int? maxSteps;
+  final DateTime? lastLiveAt;
+  final DateTime? lastRawAt;
+
+  bool get hasData => liveRecords > 0 || rawPpgFrames > 0 || puckEvents > 0;
+}
+
 class PuckStatus {
   const PuckStatus({
     required this.receivedAt,
@@ -292,6 +316,7 @@ class RawPpgFrame {
     required this.sensorStatus,
     required this.payloadLength,
     required this.payloadHex,
+    required this.samples,
   });
 
   final DateTime receivedAt;
@@ -301,6 +326,7 @@ class RawPpgFrame {
   final int? sensorStatus;
   final int payloadLength;
   final String payloadHex;
+  final List<int> samples;
 
   String get sensorLabel {
     switch (sensorStatus) {
