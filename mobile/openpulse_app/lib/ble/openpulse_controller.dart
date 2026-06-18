@@ -26,8 +26,8 @@ class OpenPulseController extends ChangeNotifier {
   DeviceMode selectedMode = DeviceMode.active;
   int samplingHz = 25;
   int ledGreenMa = 8;
-  int ledRedMa = 0;
-  int ledIrMa = 0;
+  int ledRedMa = 4;
+  int ledIrMa = 4;
   bool storageReady = false;
   bool gattReady = false;
   bool customServiceReady = false;
@@ -54,6 +54,7 @@ class OpenPulseController extends ChangeNotifier {
   int _lastDeviceUptimeMs = 0;
   int _syncedUnixMs = 0;
   int _syncedDeviceUptimeMs = 0;
+  Timer? _rawPollTimer;
 
   String? get deviceName {
     final device = _device;
@@ -82,6 +83,7 @@ class OpenPulseController extends ChangeNotifier {
         restoreState: true,
       );
       notifyListeners();
+      unawaited(scanAndConnect());
     } catch (error) {
       _setPhase(
         ConnectionPhase.error,
@@ -186,6 +188,31 @@ class OpenPulseController extends ChangeNotifier {
     await _writeControl(OpenPulseBleContract.buildRequestRawWindow(10));
   }
 
+  Future<void> _startRawPpgSampling() async {
+    if (!customServiceReady || !rawPpgReady) {
+      return;
+    }
+    try {
+      await _writeControl(
+        OpenPulseBleContract.buildSetLedCurrent(
+          greenMa: ledGreenMa,
+          redMa: ledRedMa,
+          irMa: ledIrMa,
+        ),
+      );
+      await Future<void>.delayed(const Duration(milliseconds: 1200));
+      await requestRawPpgWindow();
+      _rawPollTimer?.cancel();
+      _rawPollTimer = Timer.periodic(const Duration(seconds: 5), (_) {
+        if (phase == ConnectionPhase.streaming && customServiceReady) {
+          unawaited(requestRawPpgWindow());
+        }
+      });
+    } catch (_) {
+      // Raw PPG can fail independently; puck status remains the hardware truth.
+    }
+  }
+
   Future<void> enterShipMode() async {
     selectedMode = DeviceMode.shipMode;
     await _writeControl(OpenPulseBleContract.buildEnterShipMode());
@@ -254,6 +281,7 @@ class OpenPulseController extends ChangeNotifier {
       await _timeSync();
 
       _setPhase(ConnectionPhase.streaming, 'OpenPulse is connected and live.');
+      unawaited(_startRawPpgSampling());
     } catch (error) {
       _clearGatt();
       _setPhase(ConnectionPhase.error, 'BLE connection failed: $error');
@@ -598,6 +626,8 @@ class OpenPulseController extends ChangeNotifier {
   }
 
   void _clearGatt({bool closeSession = true}) {
+    _rawPollTimer?.cancel();
+    _rawPollTimer = null;
     if (closeSession) {
       storage.closeSession(_sessionId);
     }
@@ -630,6 +660,7 @@ class OpenPulseController extends ChangeNotifier {
 
   @override
   void dispose() {
+    _rawPollTimer?.cancel();
     unawaited(_adapterSubscription?.cancel());
     unawaited(_scanSubscription?.cancel());
     unawaited(_connectionSubscription?.cancel());

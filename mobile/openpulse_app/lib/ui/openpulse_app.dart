@@ -208,6 +208,7 @@ class HomePage extends StatelessWidget {
     final live = controller.latestLiveRecord;
     final battery = controller.latestBattery;
     final puck = controller.latestPuckStatus;
+    final raw = controller.latestRawPpgFrame;
     return _Grid(
       children: [
         _StatusCard(controller: controller),
@@ -240,6 +241,15 @@ class HomePage extends StatelessWidget {
                 label: 'Quality',
                 value: live?.qualityLabel ?? 'Unavailable',
                 unit: '',
+              ),
+              _MetricTile(
+                label: 'Raw PPG',
+                value: raw == null
+                    ? 'Unavailable'
+                    : raw.payloadLength > 0
+                    ? raw.payloadLength.toString()
+                    : raw.sensorLabel,
+                unit: raw != null && raw.payloadLength > 0 ? 'bytes' : '',
               ),
             ],
           ),
