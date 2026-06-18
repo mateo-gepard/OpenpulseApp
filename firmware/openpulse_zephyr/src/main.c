@@ -43,6 +43,7 @@ LOG_MODULE_REGISTER(openpulse, LOG_LEVEL_INF);
 #define MAXM86161_EXPECTED_PART_ID 0x36
 #define MAXM86161_FIFO_ITEM_BYTES 3
 #define MAXM86161_FIFO_FLUSH BIT(4)
+#define MAXM86161_FIFO_RO BIT(1)
 #define MAXM86161_SYSTEM_RESET BIT(0)
 #define MAXM86161_SYSTEM_SHDN BIT(1)
 #define MAXM86161_SYSTEM_SINGLE_PPG BIT(3)
@@ -94,13 +95,15 @@ static uint16_t bulk_sequence;
 static uint16_t raw_sequence;
 static uint16_t sampling_hz = 25;
 static uint8_t led_green_ma = 8;
-static uint8_t led_red_ma = 0;
-static uint8_t led_ir_ma = 0;
+static uint8_t led_red_ma = 4;
+static uint8_t led_ir_ma = 4;
 static bool maxm86161_configured;
 static uint16_t maxm86161_config_sampling_hz;
 static uint8_t maxm86161_config_led_green_ma;
 static uint8_t maxm86161_config_led_red_ma;
 static uint8_t maxm86161_config_led_ir_ma;
+static uint16_t pending_raw_seconds;
+static uint8_t pending_raw_sensor_status = OP_SENSOR_STATUS_UNAVAILABLE;
 
 static uint8_t battery_level = 0xff;
 static bool battery_level_known;
@@ -115,8 +118,10 @@ extern const struct bt_gatt_service_static openpulse_svc;
 
 static void stream_work_handler(struct k_work *work);
 static void sensor_work_handler(struct k_work *work);
+static void raw_window_work_handler(struct k_work *work);
 static K_WORK_DELAYABLE_DEFINE(stream_work, stream_work_handler);
 static K_WORK_DELAYABLE_DEFINE(sensor_work, sensor_work_handler);
+static K_WORK_DELAYABLE_DEFINE(raw_window_work, raw_window_work_handler);
 
 static struct bt_uuid_16 dis_service_uuid = BT_UUID_INIT_16(0x180a);
 static struct bt_uuid_16 dis_manufacturer_uuid = BT_UUID_INIT_16(0x2a29);
@@ -210,8 +215,9 @@ static int notify_battery(void)
 	return bt_gatt_notify(current_conn, &battery_svc.attrs[2], &battery_level, sizeof(battery_level));
 }
 
+static int start_advertising(void);
 static int notify_puck_status(void);
-static void send_raw_window(uint16_t seconds);
+static uint8_t prepare_maxm86161(void);
 
 static ssize_t read_control(struct bt_conn *conn,
 			    const struct bt_gatt_attr *attr,
@@ -353,7 +359,13 @@ static ssize_t write_control(struct bt_conn *conn,
 		if (payload_len != 2) {
 			return BT_GATT_ERR(BT_ATT_ERR_INVALID_ATTRIBUTE_LEN);
 		}
-		send_raw_window(sys_get_le16(payload));
+		pending_raw_seconds = sys_get_le16(payload);
+		pending_raw_sensor_status = prepare_maxm86161();
+		if (pending_raw_sensor_status == OP_SENSOR_STATUS_OK) {
+			k_work_reschedule(&raw_window_work, K_MSEC(750));
+		} else {
+			send_raw_frame(pending_raw_seconds, pending_raw_sensor_status, NULL, 0);
+		}
 		notify_control_ack(command, 0);
 		break;
 	case 0x07:
@@ -441,10 +453,25 @@ BT_GATT_SERVICE_DEFINE(openpulse_svc,
 );
 
 #if DT_NODE_HAS_STATUS(DT_NODELABEL(i2c0), okay)
-#define OPENPULSE_HAS_I2C 1
-static const struct device *const ppg_i2c = DEVICE_DT_GET(DT_NODELABEL(i2c0));
+#define OPENPULSE_HAS_I2C0 1
+static const struct device *const ppg_i2c0 = DEVICE_DT_GET(DT_NODELABEL(i2c0));
 #else
-#define OPENPULSE_HAS_I2C 0
+#define OPENPULSE_HAS_I2C0 0
+#endif
+
+#if DT_NODE_HAS_STATUS(DT_NODELABEL(i2c1), okay)
+#define OPENPULSE_HAS_I2C1 1
+static const struct device *const ppg_i2c1 = DEVICE_DT_GET(DT_NODELABEL(i2c1));
+#else
+#define OPENPULSE_HAS_I2C1 0
+#endif
+
+#define OPENPULSE_HAS_I2C (OPENPULSE_HAS_I2C0 || OPENPULSE_HAS_I2C1)
+
+#if OPENPULSE_HAS_I2C
+static const struct device *active_ppg_i2c;
+static const char *active_ppg_i2c_name = "none";
+static uint8_t last_probe_status = 0xff;
 #endif
 
 #if DT_NODE_HAS_PROP(DT_PATH(zephyr_user), io_channels)
@@ -502,10 +529,34 @@ static uint8_t maxm86161_led_current_code(uint8_t ma)
 	return code > 0xffU ? 0xff : (uint8_t)code;
 }
 
+static void maxm86161_led_sequence(uint8_t *seq1, uint8_t *seq2, uint8_t *seq3)
+{
+	uint8_t ledc[6] = { 0 };
+	uint8_t count = 0;
+
+	if (led_green_ma > 0) {
+		ledc[count++] = 0x01;
+	}
+	if (led_ir_ma > 0) {
+		ledc[count++] = 0x02;
+	}
+	if (led_red_ma > 0) {
+		ledc[count++] = 0x03;
+	}
+
+	*seq1 = (ledc[1] << 4) | ledc[0];
+	*seq2 = (ledc[3] << 4) | ledc[2];
+	*seq3 = (ledc[5] << 4) | ledc[4];
+}
+
 static int maxm86161_write_reg(uint8_t reg, uint8_t value)
 {
 #if OPENPULSE_HAS_I2C
-	return i2c_reg_write_byte(ppg_i2c, MAXM86161_I2C_ADDR, reg, value);
+	if (active_ppg_i2c == NULL) {
+		return -ENODEV;
+	}
+
+	return i2c_reg_write_byte(active_ppg_i2c, MAXM86161_I2C_ADDR, reg, value);
 #else
 	ARG_UNUSED(reg);
 	ARG_UNUSED(value);
@@ -513,28 +564,106 @@ static int maxm86161_write_reg(uint8_t reg, uint8_t value)
 #endif
 }
 
-static uint8_t probe_maxm86161(void)
+static int maxm86161_read_reg(uint8_t reg, uint8_t *value)
 {
 #if OPENPULSE_HAS_I2C
+	if (active_ppg_i2c == NULL) {
+		return -ENODEV;
+	}
+
+	return i2c_reg_read_byte(active_ppg_i2c, MAXM86161_I2C_ADDR, reg, value);
+#else
+	ARG_UNUSED(reg);
+	ARG_UNUSED(value);
+	return -ENODEV;
+#endif
+}
+
+#if OPENPULSE_HAS_I2C
+static uint8_t probe_maxm86161_bus(const struct device *bus,
+				   const char *bus_name,
+				   bool *saw_ready_bus)
+{
 	uint8_t part_id = 0;
+	const struct device *previous_bus = active_ppg_i2c;
 	int err;
 
-	if (!device_is_ready(ppg_i2c)) {
+	if (!device_is_ready(bus)) {
 		return OP_SENSOR_STATUS_I2C_NOT_READY;
 	}
 
-	err = i2c_reg_read_byte(ppg_i2c, MAXM86161_I2C_ADDR, MAXM86161_REG_PART_ID, &part_id);
+	*saw_ready_bus = true;
+	err = i2c_reg_read_byte(bus, MAXM86161_I2C_ADDR, MAXM86161_REG_PART_ID, &part_id);
 	if (err) {
-		LOG_WRN("MAXM86161 probe failed: %d", err);
 		return OP_SENSOR_STATUS_UNAVAILABLE;
 	}
 
 	if (part_id != MAXM86161_EXPECTED_PART_ID) {
-		LOG_WRN("MAXM86161 unexpected part id: 0x%02x", part_id);
+		LOG_WRN("MAXM86161 unexpected part id on %s: 0x%02x", bus_name, part_id);
 		return OP_SENSOR_STATUS_UNEXPECTED_PART_ID;
 	}
 
+	active_ppg_i2c = bus;
+	active_ppg_i2c_name = bus_name;
+	if (previous_bus != bus || last_probe_status != OP_SENSOR_STATUS_OK) {
+		LOG_INF("MAXM86161 detected on %s", bus_name);
+	}
+
 	return OP_SENSOR_STATUS_OK;
+}
+#endif
+
+static uint8_t probe_maxm86161(void)
+{
+#if OPENPULSE_HAS_I2C
+	bool saw_ready_bus = false;
+	bool saw_unexpected_part_id = false;
+	uint8_t status;
+
+	if (active_ppg_i2c != NULL) {
+		status = probe_maxm86161_bus(active_ppg_i2c, active_ppg_i2c_name, &saw_ready_bus);
+		if (status == OP_SENSOR_STATUS_OK) {
+			last_probe_status = status;
+			return status;
+		}
+
+		active_ppg_i2c = NULL;
+		active_ppg_i2c_name = "none";
+		maxm86161_configured = false;
+		if (status == OP_SENSOR_STATUS_UNEXPECTED_PART_ID) {
+			saw_unexpected_part_id = true;
+		}
+	}
+
+#if OPENPULSE_HAS_I2C1
+	status = probe_maxm86161_bus(ppg_i2c1, "i2c1/xiao-connector", &saw_ready_bus);
+	if (status == OP_SENSOR_STATUS_OK) {
+		last_probe_status = status;
+		return status;
+	}
+	if (status == OP_SENSOR_STATUS_UNEXPECTED_PART_ID) {
+		saw_unexpected_part_id = true;
+	}
+#endif
+
+#if OPENPULSE_HAS_I2C0
+	status = probe_maxm86161_bus(ppg_i2c0, "i2c0/onboard", &saw_ready_bus);
+	if (status == OP_SENSOR_STATUS_OK) {
+		last_probe_status = status;
+		return status;
+	}
+	if (status == OP_SENSOR_STATUS_UNEXPECTED_PART_ID) {
+		saw_unexpected_part_id = true;
+	}
+#endif
+
+	status = saw_unexpected_part_id ? OP_SENSOR_STATUS_UNEXPECTED_PART_ID :
+		 (saw_ready_bus ? OP_SENSOR_STATUS_UNAVAILABLE : OP_SENSOR_STATUS_I2C_NOT_READY);
+	if (status != last_probe_status) {
+		LOG_WRN("MAXM86161 unavailable on configured I2C buses, status %u", status);
+		last_probe_status = status;
+	}
+	return status;
 #else
 	return OP_SENSOR_STATUS_I2C_NOT_READY;
 #endif
@@ -546,6 +675,9 @@ static int configure_maxm86161(void)
 	uint8_t discard;
 	uint8_t ppg_config2;
 	uint8_t system_control = MAXM86161_SYSTEM_SINGLE_PPG;
+	uint8_t led_seq1;
+	uint8_t led_seq2;
+	uint8_t led_seq3;
 
 	if (maxm86161_configured &&
 	    maxm86161_config_sampling_hz == sampling_hz &&
@@ -569,6 +701,9 @@ static int configure_maxm86161(void)
 		return err;
 	}
 
+	(void)maxm86161_read_reg(MAXM86161_REG_INT_STATUS1, &discard);
+	(void)maxm86161_read_reg(MAXM86161_REG_INT_STATUS2, &discard);
+	maxm86161_led_sequence(&led_seq1, &led_seq2, &led_seq3);
 	ppg_config2 = (maxm86161_sample_rate_code(sampling_hz) << 3);
 	if (sampling_hz <= 256) {
 		system_control |= MAXM86161_SYSTEM_LOW_POWER;
@@ -577,6 +712,11 @@ static int configure_maxm86161(void)
 	err = maxm86161_write_reg(MAXM86161_REG_FIFO_CONFIG2, MAXM86161_FIFO_FLUSH);
 	if (err) {
 		LOG_WRN("MAXM86161 FIFO flush failed: %d", err);
+		return err;
+	}
+	err = maxm86161_write_reg(MAXM86161_REG_FIFO_CONFIG2, MAXM86161_FIFO_RO);
+	if (err) {
+		LOG_WRN("MAXM86161 FIFO rollover config failed: %d", err);
 		return err;
 	}
 	err = maxm86161_write_reg(MAXM86161_REG_PPG_CONFIG1, 0x0b);
@@ -589,7 +729,7 @@ static int configure_maxm86161(void)
 		LOG_WRN("MAXM86161 PPG config 2 failed: %d", err);
 		return err;
 	}
-	err = maxm86161_write_reg(MAXM86161_REG_PPG_CONFIG3, 0x40);
+	err = maxm86161_write_reg(MAXM86161_REG_PPG_CONFIG3, 0xc0);
 	if (err) {
 		LOG_WRN("MAXM86161 PPG config 3 failed: %d", err);
 		return err;
@@ -602,21 +742,6 @@ static int configure_maxm86161(void)
 	err = maxm86161_write_reg(MAXM86161_REG_LED_RANGE1, 0x00);
 	if (err) {
 		LOG_WRN("MAXM86161 LED range failed: %d", err);
-		return err;
-	}
-	err = maxm86161_write_reg(MAXM86161_REG_LED_SEQ1, 0x01);
-	if (err) {
-		LOG_WRN("MAXM86161 LED sequence 1 failed: %d", err);
-		return err;
-	}
-	err = maxm86161_write_reg(MAXM86161_REG_LED_SEQ2, 0x00);
-	if (err) {
-		LOG_WRN("MAXM86161 LED sequence 2 failed: %d", err);
-		return err;
-	}
-	err = maxm86161_write_reg(MAXM86161_REG_LED_SEQ3, 0x00);
-	if (err) {
-		LOG_WRN("MAXM86161 LED sequence 3 failed: %d", err);
 		return err;
 	}
 	err = maxm86161_write_reg(MAXM86161_REG_LED1_PA,
@@ -637,18 +762,26 @@ static int configure_maxm86161(void)
 		LOG_WRN("MAXM86161 LED3 current failed: %d", err);
 		return err;
 	}
+	err = maxm86161_write_reg(MAXM86161_REG_LED_SEQ3, led_seq3);
+	if (err) {
+		LOG_WRN("MAXM86161 LED sequence 3 failed: %d", err);
+		return err;
+	}
+	err = maxm86161_write_reg(MAXM86161_REG_LED_SEQ2, led_seq2);
+	if (err) {
+		LOG_WRN("MAXM86161 LED sequence 2 failed: %d", err);
+		return err;
+	}
+	err = maxm86161_write_reg(MAXM86161_REG_LED_SEQ1, led_seq1);
+	if (err) {
+		LOG_WRN("MAXM86161 LED sequence 1 failed: %d", err);
+		return err;
+	}
 	err = maxm86161_write_reg(MAXM86161_REG_SYSTEM_CONTROL, system_control);
 	if (err) {
 		LOG_WRN("MAXM86161 start failed: %d", err);
 		return err;
 	}
-
-#if OPENPULSE_HAS_I2C
-	(void)i2c_reg_read_byte(ppg_i2c, MAXM86161_I2C_ADDR,
-				MAXM86161_REG_INT_STATUS1, &discard);
-	(void)i2c_reg_read_byte(ppg_i2c, MAXM86161_I2C_ADDR,
-				MAXM86161_REG_INT_STATUS2, &discard);
-#endif
 
 	maxm86161_configured = true;
 	maxm86161_config_sampling_hz = sampling_hz;
@@ -688,18 +821,20 @@ static int read_maxm86161_fifo_payload(uint8_t *payload,
 	int err;
 
 	*payload_len = 0;
+	if (active_ppg_i2c == NULL) {
+		return -ENODEV;
+	}
+
 	if (max_items == 0) {
 		return 0;
 	}
 
-	err = i2c_reg_read_byte(ppg_i2c, MAXM86161_I2C_ADDR,
-				MAXM86161_REG_OVERFLOW_COUNTER, &overflow_count);
+	err = maxm86161_read_reg(MAXM86161_REG_OVERFLOW_COUNTER, &overflow_count);
 	if (err) {
 		return err;
 	}
 
-	err = i2c_reg_read_byte(ppg_i2c, MAXM86161_I2C_ADDR,
-				MAXM86161_REG_FIFO_DATA_COUNT, &fifo_count);
+	err = maxm86161_read_reg(MAXM86161_REG_FIFO_DATA_COUNT, &fifo_count);
 	if (err) {
 		return err;
 	}
@@ -710,7 +845,7 @@ static int read_maxm86161_fifo_payload(uint8_t *payload,
 	}
 
 	for (uint8_t i = 0; i < item_count; i++) {
-		err = i2c_burst_read(ppg_i2c, MAXM86161_I2C_ADDR,
+		err = i2c_burst_read(active_ppg_i2c, MAXM86161_I2C_ADDR,
 				     MAXM86161_REG_FIFO_DATA,
 				     &payload[i * MAXM86161_FIFO_ITEM_BYTES],
 				     MAXM86161_FIFO_ITEM_BYTES);
@@ -730,11 +865,10 @@ static int read_maxm86161_fifo_payload(uint8_t *payload,
 #endif
 }
 
-static void send_raw_window(uint16_t seconds)
+static void send_raw_window_from_fifo(uint16_t seconds, uint8_t status)
 {
 	uint8_t payload[OP_RAW_MAX_PAYLOAD_BYTES];
 	uint8_t payload_len = 0;
-	uint8_t status = prepare_maxm86161();
 	int err;
 
 	if (status != OP_SENSOR_STATUS_OK) {
@@ -849,6 +983,13 @@ static void sensor_work_handler(struct k_work *work)
 	k_work_reschedule(&sensor_work, K_SECONDS(5));
 }
 
+static void raw_window_work_handler(struct k_work *work)
+{
+	ARG_UNUSED(work);
+
+	send_raw_window_from_fifo(pending_raw_seconds, pending_raw_sensor_status);
+}
+
 static void stream_work_handler(struct k_work *work)
 {
 	uint8_t frame[16];
@@ -887,6 +1028,10 @@ static void connected(struct bt_conn *conn, uint8_t err)
 {
 	if (err) {
 		LOG_ERR("BLE connection failed: %u", err);
+		err = start_advertising();
+		if (err && err != -EALREADY) {
+			LOG_ERR("BLE advertising restart after failed connection failed: %d", err);
+		}
 		return;
 	}
 
@@ -897,13 +1042,30 @@ static void connected(struct bt_conn *conn, uint8_t err)
 
 static void disconnected(struct bt_conn *conn, uint8_t reason)
 {
+	int err;
+
 	LOG_INF("BLE disconnected: 0x%02x", reason);
 
 	k_work_cancel_delayable(&stream_work);
+	k_work_cancel_delayable(&raw_window_work);
+	control_notify_enabled = false;
+	live_notify_enabled = false;
+	bulk_notify_enabled = false;
+	raw_notify_enabled = false;
+	puck_notify_enabled = false;
+	battery_notify_enabled = false;
+	time_synced = false;
 
 	if (current_conn) {
 		bt_conn_unref(current_conn);
 		current_conn = NULL;
+	}
+
+	err = start_advertising();
+	if (err && err != -EALREADY) {
+		LOG_ERR("BLE advertising restart failed: %d", err);
+	} else {
+		LOG_INF("Advertising as OpenPulse");
 	}
 }
 
