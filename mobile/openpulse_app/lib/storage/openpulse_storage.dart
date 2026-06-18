@@ -93,6 +93,42 @@ class OpenPulseStorage {
         FOREIGN KEY(session_id) REFERENCES device_sessions(id)
       );
     ''');
+    db.execute('''
+      CREATE TABLE IF NOT EXISTS control_acks (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        session_id INTEGER,
+        received_at_ms INTEGER NOT NULL,
+        command INTEGER NOT NULL,
+        status INTEGER NOT NULL,
+        mode INTEGER NOT NULL,
+        FOREIGN KEY(session_id) REFERENCES device_sessions(id)
+      );
+    ''');
+    db.execute('''
+      CREATE TABLE IF NOT EXISTS backfill_frames (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        session_id INTEGER,
+        received_at_ms INTEGER NOT NULL,
+        record_kind INTEGER NOT NULL,
+        sequence INTEGER NOT NULL,
+        payload_length INTEGER NOT NULL,
+        payload_hex TEXT NOT NULL,
+        FOREIGN KEY(session_id) REFERENCES device_sessions(id)
+      );
+    ''');
+    db.execute('''
+      CREATE TABLE IF NOT EXISTS raw_ppg_frames (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        session_id INTEGER,
+        received_at_ms INTEGER NOT NULL,
+        sequence INTEGER NOT NULL,
+        requested_seconds INTEGER,
+        attached INTEGER,
+        sensor_status INTEGER,
+        payload_hex TEXT NOT NULL,
+        FOREIGN KEY(session_id) REFERENCES device_sessions(id)
+      );
+    ''');
   }
 
   int insertSession({
@@ -233,6 +269,60 @@ class OpenPulseStorage {
         DateTime.now().millisecondsSinceEpoch,
         command,
         frame.map((byte) => byte.toRadixString(16).padLeft(2, '0')).join(),
+      ],
+    );
+  }
+
+  void insertControlAck(int? sessionId, ControlAck ack) {
+    _requireDb().execute(
+      '''
+      INSERT INTO control_acks (
+        session_id, received_at_ms, command, status, mode
+      ) VALUES (?, ?, ?, ?, ?)
+      ''',
+      [
+        sessionId,
+        ack.receivedAt.millisecondsSinceEpoch,
+        ack.command,
+        ack.status,
+        ack.mode,
+      ],
+    );
+  }
+
+  void insertBackfillFrame(int? sessionId, BulkBackfillFrame frame) {
+    _requireDb().execute(
+      '''
+      INSERT INTO backfill_frames (
+        session_id, received_at_ms, record_kind, sequence, payload_length, payload_hex
+      ) VALUES (?, ?, ?, ?, ?, ?)
+      ''',
+      [
+        sessionId,
+        frame.receivedAt.millisecondsSinceEpoch,
+        frame.recordKind,
+        frame.sequence,
+        frame.payloadLength,
+        frame.payloadHex,
+      ],
+    );
+  }
+
+  void insertRawPpgFrame(int? sessionId, RawPpgFrame frame) {
+    _requireDb().execute(
+      '''
+      INSERT INTO raw_ppg_frames (
+        session_id, received_at_ms, sequence, requested_seconds, attached, sensor_status, payload_hex
+      ) VALUES (?, ?, ?, ?, ?, ?, ?)
+      ''',
+      [
+        sessionId,
+        frame.receivedAt.millisecondsSinceEpoch,
+        frame.sequence,
+        frame.requestedSeconds,
+        frame.attached == null ? null : (frame.attached! ? 1 : 0),
+        frame.sensorStatus,
+        frame.payloadHex,
       ],
     );
   }

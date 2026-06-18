@@ -20,6 +20,9 @@ class OpenPulseController extends ChangeNotifier {
   BatterySample? latestBattery;
   PuckStatus? latestPuckStatus;
   LiveRecord? latestLiveRecord;
+  ControlAck? latestControlAck;
+  BulkBackfillFrame? latestBackfillFrame;
+  RawPpgFrame? latestRawPpgFrame;
   DeviceMode selectedMode = DeviceMode.active;
   int samplingHz = 25;
   int ledGreenMa = 8;
@@ -30,10 +33,15 @@ class OpenPulseController extends ChangeNotifier {
   bool customServiceReady = false;
   bool batteryServiceReady = false;
   bool deviceInfoReady = false;
+  bool controlNotifyReady = false;
+  bool bulkBackfillReady = false;
+  bool rawPpgReady = false;
 
   BluetoothDevice? _device;
   BluetoothCharacteristic? _control;
   BluetoothCharacteristic? _live;
+  BluetoothCharacteristic? _bulk;
+  BluetoothCharacteristic? _raw;
   BluetoothCharacteristic? _puck;
   BluetoothCharacteristic? _battery;
   StreamSubscription<BluetoothAdapterState>? _adapterSubscription;
@@ -259,8 +267,13 @@ class OpenPulseController extends ChangeNotifier {
     batteryServiceReady = false;
     _control = null;
     _live = null;
+    _bulk = null;
+    _raw = null;
     _puck = null;
     _battery = null;
+    controlNotifyReady = false;
+    bulkBackfillReady = false;
+    rawPpgReady = false;
 
     for (final service in services) {
       if (OpenPulseBleContract.uuidMatches(
@@ -279,6 +292,20 @@ class OpenPulseController extends ChangeNotifier {
             OpenPulseBleContract.liveStreamUuid,
           )) {
             _live = characteristic;
+          } else if (OpenPulseBleContract.uuidMatches(
+            characteristic.uuid,
+            OpenPulseBleContract.bulkBackfillUuid,
+          )) {
+            _bulk = characteristic;
+            bulkBackfillReady =
+                characteristic.properties.notify ||
+                characteristic.properties.indicate;
+          } else if (OpenPulseBleContract.uuidMatches(
+            characteristic.uuid,
+            OpenPulseBleContract.rawPpgUuid,
+          )) {
+            _raw = characteristic;
+            rawPpgReady = characteristic.properties.notify;
           } else if (OpenPulseBleContract.uuidMatches(
             characteristic.uuid,
             OpenPulseBleContract.puckStatusUuid,
@@ -415,6 +442,25 @@ class OpenPulseController extends ChangeNotifier {
     }
     _valueSubscriptions.clear();
 
+    final control = _control;
+    if (control != null && control.properties.notify) {
+      controlNotifyReady = true;
+      _valueSubscriptions.add(
+        control.onValueReceived.listen((bytes) {
+          final ack = OpenPulseBleContract.parseControlAck(
+            bytes,
+            DateTime.now(),
+          );
+          if (ack != null) {
+            latestControlAck = ack;
+            storage.insertControlAck(_sessionId, ack);
+            notifyListeners();
+          }
+        }),
+      );
+      await control.setNotifyValue(true);
+    }
+
     final battery = _battery;
     if (battery != null && battery.properties.notify) {
       _valueSubscriptions.add(
@@ -456,6 +502,18 @@ class OpenPulseController extends ChangeNotifier {
       _valueSubscriptions.add(live.onValueReceived.listen(_handleLiveFrame));
       await live.setNotifyValue(true);
     }
+
+    final bulk = _bulk;
+    if (bulk != null && (bulk.properties.notify || bulk.properties.indicate)) {
+      _valueSubscriptions.add(bulk.onValueReceived.listen(_handleBulkFrame));
+      await bulk.setNotifyValue(true);
+    }
+
+    final raw = _raw;
+    if (raw != null && raw.properties.notify) {
+      _valueSubscriptions.add(raw.onValueReceived.listen(_handleRawPpgFrame));
+      await raw.setNotifyValue(true);
+    }
   }
 
   Future<void> _timeSync() async {
@@ -494,6 +552,26 @@ class OpenPulseController extends ChangeNotifier {
     notifyListeners();
   }
 
+  void _handleBulkFrame(List<int> bytes) {
+    final frame = OpenPulseBleContract.parseBulkFrame(bytes, DateTime.now());
+    if (frame == null) {
+      return;
+    }
+    latestBackfillFrame = frame;
+    storage.insertBackfillFrame(_sessionId, frame);
+    notifyListeners();
+  }
+
+  void _handleRawPpgFrame(List<int> bytes) {
+    final frame = OpenPulseBleContract.parseRawPpgFrame(bytes, DateTime.now());
+    if (frame == null) {
+      return;
+    }
+    latestRawPpgFrame = frame;
+    storage.insertRawPpgFrame(_sessionId, frame);
+    notifyListeners();
+  }
+
   Future<void> _writeControl(List<int> frame) async {
     final control = _control;
     if (control == null) {
@@ -528,8 +606,13 @@ class OpenPulseController extends ChangeNotifier {
     customServiceReady = false;
     batteryServiceReady = false;
     deviceInfoReady = false;
+    controlNotifyReady = false;
+    bulkBackfillReady = false;
+    rawPpgReady = false;
     _control = null;
     _live = null;
+    _bulk = null;
+    _raw = null;
     _puck = null;
     _battery = null;
     _lastDeviceUptimeMs = 0;

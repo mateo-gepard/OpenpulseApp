@@ -194,3 +194,108 @@ class ParsedLiveFrame {
   final List<LiveRecord> records;
   final int lastDeviceUptimeMs;
 }
+
+class ControlAck {
+  const ControlAck({
+    required this.receivedAt,
+    required this.command,
+    required this.status,
+    required this.mode,
+  });
+
+  final DateTime receivedAt;
+  final int command;
+  final int status;
+  final int mode;
+
+  bool get ok => status == 0;
+
+  String get commandLabel {
+    switch (command) {
+      case 0x01:
+        return 'Time sync';
+      case 0x02:
+        return 'Set mode';
+      case 0x03:
+        return 'Set sampling';
+      case 0x04:
+        return 'Set LED';
+      case 0x05:
+        return 'Request backfill';
+      case 0x06:
+        return 'Request raw PPG';
+      case 0x07:
+        return 'Ship mode';
+      default:
+        return 'Command 0x${command.toRadixString(16).padLeft(2, '0')}';
+    }
+  }
+
+  String get statusLabel => ok ? 'OK' : 'Rejected';
+}
+
+class BulkBackfillFrame {
+  const BulkBackfillFrame({
+    required this.receivedAt,
+    required this.recordKind,
+    required this.sequence,
+    required this.payloadLength,
+    required this.payloadHex,
+  });
+
+  final DateTime receivedAt;
+  final int recordKind;
+  final int sequence;
+  final int payloadLength;
+  final String payloadHex;
+
+  String get kindLabel {
+    switch (recordKind) {
+      case 1:
+        return '1-minute aggregate';
+      case 2:
+        return 'IBI night window';
+      case 3:
+        return 'Clean shutdown marker';
+      case 4:
+        return 'Gap marker';
+      default:
+        return 'Kind $recordKind';
+    }
+  }
+}
+
+class RawPpgFrame {
+  const RawPpgFrame({
+    required this.receivedAt,
+    required this.sequence,
+    required this.requestedSeconds,
+    required this.attached,
+    required this.sensorStatus,
+    required this.payloadHex,
+  });
+
+  final DateTime receivedAt;
+  final int sequence;
+  final int? requestedSeconds;
+  final bool? attached;
+  final int? sensorStatus;
+  final String payloadHex;
+
+  String get sensorLabel {
+    switch (sensorStatus) {
+      case null:
+        return 'Raw payload';
+      case 0:
+        return 'OK';
+      case 1:
+        return 'Unavailable';
+      case 2:
+        return 'I2C not ready';
+      case 3:
+        return 'Unexpected part ID';
+      default:
+        return 'Status $sensorStatus';
+    }
+  }
+}

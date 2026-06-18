@@ -1,0 +1,62 @@
+import 'package:flutter_test/flutter_test.dart';
+import 'package:openpulse_app/ble/openpulse_ble_contract.dart';
+
+void main() {
+  test('parses control acknowledgement frames', () {
+    final ack = OpenPulseBleContract.parseControlAck([
+      0x80,
+      0x01,
+      0x00,
+      0x01,
+    ], DateTime.fromMillisecondsSinceEpoch(1000));
+
+    expect(ack, isNotNull);
+    expect(ack!.commandLabel, 'Time sync');
+    expect(ack.ok, isTrue);
+    expect(ack.mode, 1);
+  });
+
+  test('parses bulk gap marker frames', () {
+    final frame = OpenPulseBleContract.parseBulkFrame([
+      0x20,
+      0x04,
+      0x2a,
+      0x00,
+      0x08,
+      0x00,
+      0x10,
+      0x27,
+      0x00,
+      0x00,
+      0x00,
+      0x00,
+      0x00,
+      0x00,
+    ], DateTime.fromMillisecondsSinceEpoch(1000));
+
+    expect(frame, isNotNull);
+    expect(frame!.kindLabel, 'Gap marker');
+    expect(frame.sequence, 42);
+    expect(frame.payloadLength, 8);
+    expect(frame.payloadHex, '1027000000000000');
+  });
+
+  test('parses raw PPG unavailable diagnostic frames', () {
+    final frame = OpenPulseBleContract.parseRawPpgFrame([
+      0x30,
+      0x03,
+      0x00,
+      0x0a,
+      0x00,
+      0x00,
+      0x01,
+      0x00,
+    ], DateTime.fromMillisecondsSinceEpoch(1000));
+
+    expect(frame, isNotNull);
+    expect(frame!.sequence, 3);
+    expect(frame.requestedSeconds, 10);
+    expect(frame.attached, isFalse);
+    expect(frame.sensorLabel, 'Unavailable');
+  });
+}

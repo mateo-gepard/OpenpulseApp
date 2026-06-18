@@ -381,6 +381,18 @@ class DevicePage extends StatelessWidget {
                 controller.batteryServiceReady ? 'Ready' : 'Unavailable',
               ),
               _FactRow(
+                'Control notify',
+                controller.controlNotifyReady ? 'Ready' : 'Unavailable',
+              ),
+              _FactRow(
+                'Bulk backfill',
+                controller.bulkBackfillReady ? 'Ready' : 'Unavailable',
+              ),
+              _FactRow(
+                'Raw PPG',
+                controller.rawPpgReady ? 'Ready' : 'Unavailable',
+              ),
+              _FactRow(
                 'Puck',
                 puck == null
                     ? 'Unavailable'
@@ -504,6 +516,24 @@ class DevicePage extends StatelessWidget {
             spacing: 10,
             runSpacing: 10,
             children: [
+              _MiniStatus(
+                label: 'Control ACK',
+                value: controller.latestControlAck == null
+                    ? 'Unavailable'
+                    : '${controller.latestControlAck!.commandLabel} / ${controller.latestControlAck!.statusLabel}',
+              ),
+              _MiniStatus(
+                label: 'Backfill',
+                value: controller.latestBackfillFrame == null
+                    ? 'Unavailable'
+                    : '${controller.latestBackfillFrame!.kindLabel} #${controller.latestBackfillFrame!.sequence}',
+              ),
+              _MiniStatus(
+                label: 'Raw PPG',
+                value: controller.latestRawPpgFrame == null
+                    ? 'Unavailable'
+                    : controller.latestRawPpgFrame!.sensorLabel,
+              ),
               OutlinedButton.icon(
                 onPressed: controller.customServiceReady
                     ? controller.requestBackfill
@@ -818,6 +848,39 @@ class _FactRow extends StatelessWidget {
               overflow: TextOverflow.ellipsis,
               style: const TextStyle(fontWeight: FontWeight.w800),
             ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _MiniStatus extends StatelessWidget {
+  const _MiniStatus({required this.label, required this.value});
+
+  final String label;
+  final String value;
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      width: 160,
+      padding: const EdgeInsets.all(10),
+      decoration: BoxDecoration(
+        color: const Color(0xfff2f4f8),
+        borderRadius: BorderRadius.circular(8),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Text(label, style: const TextStyle(color: _muted, fontSize: 12)),
+          const SizedBox(height: 6),
+          Text(
+            value,
+            maxLines: 2,
+            overflow: TextOverflow.ellipsis,
+            style: const TextStyle(fontWeight: FontWeight.w800),
           ),
         ],
       ),

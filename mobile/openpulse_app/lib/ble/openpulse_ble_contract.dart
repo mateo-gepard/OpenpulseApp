@@ -112,6 +112,62 @@ class OpenPulseBleContract {
     );
   }
 
+  static ControlAck? parseControlAck(List<int> bytes, DateTime receivedAt) {
+    if (bytes.length < 4 || bytes[0] != 0x80) {
+      return null;
+    }
+    return ControlAck(
+      receivedAt: receivedAt,
+      command: bytes[1],
+      status: bytes[2],
+      mode: bytes[3],
+    );
+  }
+
+  static BulkBackfillFrame? parseBulkFrame(
+    List<int> bytes,
+    DateTime receivedAt,
+  ) {
+    if (bytes.length < 6 || bytes[0] != 0x20) {
+      return null;
+    }
+    final data = ByteData.sublistView(Uint8List.fromList(bytes));
+    final payloadLength = data.getUint16(4, Endian.little);
+    final payload = bytes.skip(6).take(payloadLength).toList(growable: false);
+    return BulkBackfillFrame(
+      receivedAt: receivedAt,
+      recordKind: bytes[1],
+      sequence: data.getUint16(2, Endian.little),
+      payloadLength: payloadLength,
+      payloadHex: _hex(payload),
+    );
+  }
+
+  static RawPpgFrame? parseRawPpgFrame(List<int> bytes, DateTime receivedAt) {
+    if (bytes.isEmpty) {
+      return null;
+    }
+    if (bytes[0] == 0x30 && bytes.length >= 8) {
+      final data = ByteData.sublistView(Uint8List.fromList(bytes));
+      return RawPpgFrame(
+        receivedAt: receivedAt,
+        sequence: data.getUint16(1, Endian.little),
+        requestedSeconds: data.getUint16(3, Endian.little),
+        attached: bytes[5] == 1,
+        sensorStatus: bytes[6],
+        payloadHex: _hex(bytes.sublist(7)),
+      );
+    }
+    return RawPpgFrame(
+      receivedAt: receivedAt,
+      sequence: 0,
+      requestedSeconds: null,
+      attached: null,
+      sensorStatus: null,
+      payloadHex: _hex(bytes),
+    );
+  }
+
   static ParsedLiveFrame? parseLiveFrame({
     required List<int> bytes,
     required int previousDeviceUptimeMs,
@@ -163,5 +219,9 @@ class OpenPulseBleContract {
       records: records,
       lastDeviceUptimeMs: deviceUptime,
     );
+  }
+
+  static String _hex(List<int> bytes) {
+    return bytes.map((byte) => byte.toRadixString(16).padLeft(2, '0')).join();
   }
 }
