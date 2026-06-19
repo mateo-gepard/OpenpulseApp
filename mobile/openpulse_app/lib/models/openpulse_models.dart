@@ -100,6 +100,27 @@ class DaySummary {
   bool get hasData => liveRecords > 0 || rawPpgFrames > 0 || puckEvents > 0;
 }
 
+class DebugExportResult {
+  const DebugExportResult({
+    required this.createdAt,
+    required this.fileName,
+    required this.path,
+    required this.liveRecords,
+    required this.rawPpgFrames,
+    required this.backfillFrames,
+  });
+
+  final DateTime createdAt;
+  final String fileName;
+  final String path;
+  final int liveRecords;
+  final int rawPpgFrames;
+  final int backfillFrames;
+
+  String get summary =>
+      '$rawPpgFrames raw, $liveRecords live, $backfillFrames backfill';
+}
+
 class HrvSummary {
   const HrvSummary({
     required this.rmssdMs,

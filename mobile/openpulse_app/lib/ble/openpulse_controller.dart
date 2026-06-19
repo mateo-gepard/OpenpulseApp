@@ -61,6 +61,9 @@ class OpenPulseController extends ChangeNotifier {
   bool deviceRestoreInProgress = false;
   int deviceRestoreRecordCount = 0;
   DateTime? lastDeviceRestoreAt;
+  bool debugExportInProgress = false;
+  DebugExportResult? latestDebugExport;
+  String? debugExportError;
 
   BluetoothDevice? _device;
   BluetoothCharacteristic? _control;
@@ -413,6 +416,52 @@ class OpenPulseController extends ChangeNotifier {
     selectedMode = DeviceMode.shipMode;
     await _writeControl(OpenPulseBleContract.buildEnterShipMode());
     notifyListeners();
+  }
+
+  Future<void> exportDebugData() async {
+    if (!storageReady || debugExportInProgress) {
+      return;
+    }
+    debugExportInProgress = true;
+    debugExportError = null;
+    statusMessage = 'Exporting OpenPulse debug data.';
+    notifyListeners();
+
+    try {
+      latestDebugExport = await storage.exportDebugBundle(
+        runtime: {
+          'phase': phase.label,
+          'adapter_state': adapterState.name,
+          'device_name': deviceName,
+          'firmware': deviceInformation.firmware,
+          'hardware': deviceInformation.hardware,
+          'selected_mode': selectedMode.label,
+          'sampling_hz': samplingHz,
+          'led_green_ma': ledGreenMa,
+          'led_red_ma': ledRedMa,
+          'led_ir_ma': ledIrMa,
+          'live_packet_count': livePacketCount,
+          'raw_ppg_packet_count': rawPpgPacketCount,
+          'raw_ppg_diagnostic_enabled': rawPpgDiagnosticEnabled,
+          'latest_live_frame_byte_count': latestLiveFrameByteCount,
+          'latest_live_frame_hex': latestLiveFrameHex,
+          'latest_battery_level': latestBattery?.level,
+          'latest_battery_available': latestBattery?.available,
+          'latest_puck_attached': latestPuckStatus?.attached,
+          'latest_puck_sensor_status': latestPuckStatus?.sensorStatus,
+          'device_restore_in_progress': deviceRestoreInProgress,
+          'device_restore_record_count': deviceRestoreRecordCount,
+          'last_device_restore_at': lastDeviceRestoreAt?.toIso8601String(),
+        },
+      );
+      statusMessage = 'Debug export saved: ${latestDebugExport!.fileName}.';
+    } catch (error) {
+      debugExportError = error.toString();
+      statusMessage = 'Debug export failed.';
+    } finally {
+      debugExportInProgress = false;
+      notifyListeners();
+    }
   }
 
   void _handleScanResults(List<ScanResult> results) {

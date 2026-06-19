@@ -823,6 +823,43 @@ class DeviceView extends StatelessWidget {
           ),
         ),
         const SizedBox(height: 18),
+        _SectionTitle('Debug export'),
+        _Surface(
+          child: Column(
+            children: [
+              _FactRow(
+                'Last export',
+                controller.latestDebugExport?.fileName ?? 'Not exported',
+              ),
+              _FactRow(
+                'Rows',
+                controller.latestDebugExport?.summary ?? 'Waiting',
+              ),
+              if (controller.debugExportError != null)
+                _FactRow('Error', controller.debugExportError!),
+              const SizedBox(height: 10),
+              SizedBox(
+                width: double.infinity,
+                child: OutlinedButton.icon(
+                  onPressed: controller.debugExportInProgress
+                      ? null
+                      : controller.exportDebugData,
+                  icon: Icon(
+                    controller.debugExportInProgress
+                        ? Icons.hourglass_top_rounded
+                        : Icons.ios_share_rounded,
+                  ),
+                  label: Text(
+                    controller.debugExportInProgress
+                        ? 'Exporting'
+                        : 'Export debug data',
+                  ),
+                ),
+              ),
+            ],
+          ),
+        ),
+        const SizedBox(height: 18),
         _SectionTitle('Device information'),
         _Surface(
           child: Column(

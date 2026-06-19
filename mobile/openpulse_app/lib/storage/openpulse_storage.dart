@@ -1,3 +1,5 @@
+import 'dart:convert';
+import 'dart:io';
 import 'dart:math' as math;
 
 import 'package:path/path.dart' as path;
@@ -431,6 +433,150 @@ class OpenPulseStorage {
     );
   }
 
+  Future<DebugExportResult> exportDebugBundle({
+    Duration window = const Duration(minutes: 30),
+    Map<String, Object?> runtime = const {},
+  }) async {
+    final db = _requireDb();
+    final now = DateTime.now();
+    final nowMs = now.millisecondsSinceEpoch;
+    final startMs = nowMs - window.inMilliseconds;
+    final sessions = _selectMaps(
+      db,
+      '''
+      SELECT *
+      FROM device_sessions
+      WHERE connected_at_ms >= ? OR disconnected_at_ms IS NULL OR disconnected_at_ms >= ?
+      ORDER BY connected_at_ms ASC
+      ''',
+      [startMs, startMs],
+    );
+    final liveRecords = _selectMaps(
+      db,
+      '''
+      SELECT *
+      FROM live_records
+      WHERE wall_time_ms >= ? OR received_at_ms >= ?
+      ORDER BY wall_time_ms ASC, id ASC
+      ''',
+      [startMs, startMs],
+    );
+    final rawFrames = _selectMaps(
+      db,
+      '''
+      SELECT *
+      FROM raw_ppg_frames
+      WHERE received_at_ms >= ?
+      ORDER BY received_at_ms ASC, id ASC
+      ''',
+      [startMs],
+    );
+    final backfillFrames = _selectMaps(
+      db,
+      '''
+      SELECT *
+      FROM backfill_frames
+      WHERE received_at_ms >= ?
+      ORDER BY received_at_ms ASC, id ASC
+      ''',
+      [startMs],
+    );
+    final puckEvents = _selectMaps(
+      db,
+      '''
+      SELECT *
+      FROM puck_events
+      WHERE received_at_ms >= ?
+      ORDER BY received_at_ms ASC, id ASC
+      ''',
+      [startMs],
+    );
+    final batterySamples = _selectMaps(
+      db,
+      '''
+      SELECT *
+      FROM battery_samples
+      WHERE received_at_ms >= ?
+      ORDER BY received_at_ms ASC, id ASC
+      ''',
+      [startMs],
+    );
+    final controlWrites = _selectMaps(
+      db,
+      '''
+      SELECT *
+      FROM control_writes
+      WHERE written_at_ms >= ?
+      ORDER BY written_at_ms ASC, id ASC
+      ''',
+      [startMs],
+    );
+    final controlAcks = _selectMaps(
+      db,
+      '''
+      SELECT *
+      FROM control_acks
+      WHERE received_at_ms >= ?
+      ORDER BY received_at_ms ASC, id ASC
+      ''',
+      [startMs],
+    );
+
+    final export = <String, Object?>{
+      'schema': 'openpulse-debug-export-v1',
+      'created_at_ms': nowMs,
+      'created_at_iso': now.toIso8601String(),
+      'window_minutes': window.inMinutes,
+      'window_start_ms': startMs,
+      'runtime': runtime,
+      'counts': {
+        'sessions': sessions.length,
+        'live_records': liveRecords.length,
+        'raw_ppg_frames': rawFrames.length,
+        'backfill_frames': backfillFrames.length,
+        'puck_events': puckEvents.length,
+        'battery_samples': batterySamples.length,
+        'control_writes': controlWrites.length,
+        'control_acks': controlAcks.length,
+      },
+      'sessions': sessions,
+      'live_records': liveRecords.map(_decorateLiveRecord).toList(),
+      'raw_ppg_frames': rawFrames.map(_decorateRawPpgFrame).toList(),
+      'backfill_frames': backfillFrames,
+      'puck_events': puckEvents,
+      'battery_samples': batterySamples,
+      'control_writes': controlWrites,
+      'control_acks': controlAcks,
+    };
+
+    final documentsDir = await getApplicationDocumentsDirectory();
+    final exportDir = Directory(
+      path.join(documentsDir.path, 'OpenPulse Debug Exports'),
+    );
+    if (!exportDir.existsSync()) {
+      exportDir.createSync(recursive: true);
+    }
+    final stamp = now
+        .toIso8601String()
+        .replaceAll(RegExp(r'[:.]'), '-')
+        .replaceAll('T', '_');
+    final fileName = 'openpulse_debug_$stamp.json';
+    final file = File(path.join(exportDir.path, fileName));
+    await file.writeAsString(
+      const JsonEncoder.withIndent('  ').convert(export),
+      flush: true,
+    );
+
+    return DebugExportResult(
+      createdAt: now,
+      fileName: fileName,
+      path: file.path,
+      liveRecords: liveRecords.length,
+      rawPpgFrames: rawFrames.length,
+      backfillFrames: backfillFrames.length,
+    );
+  }
+
   DaySummary fetchDaySummary(DateTime day) {
     final db = _requireDb();
     final start = DateTime(day.year, day.month, day.day);
@@ -780,6 +926,108 @@ class OpenPulseStorage {
     return lastProgressMark.time.add(const Duration(hours: 1));
   }
 
+  List<Map<String, Object?>> _selectMaps(
+    Database db,
+    String sql,
+    List<Object?> args,
+  ) {
+    final rows = db.select(sql, args);
+    return [
+      for (final row in rows) {for (final key in row.keys) key: row[key]},
+    ];
+  }
+
+  Map<String, Object?> _decorateLiveRecord(Map<String, Object?> row) {
+    final qualityFlags = row['quality_flags'] as int? ?? 0;
+    final hrX10 = row['heart_rate_x10'] as int?;
+    return {
+      ...row,
+      'received_at_iso': _isoFromMs(row['received_at_ms']),
+      'wall_time_iso': _isoFromMs(row['wall_time_ms']),
+      'heart_rate_bpm': hrX10 == null ? null : hrX10 / 10.0,
+      'quality_labels': _qualityLabels(qualityFlags),
+    };
+  }
+
+  Map<String, Object?> _decorateRawPpgFrame(Map<String, Object?> row) {
+    final payloadHex = row['payload_hex'] as String? ?? '';
+    return {
+      ...row,
+      'received_at_iso': _isoFromMs(row['received_at_ms']),
+      'payload_summary': _ppgPayloadSummary(payloadHex),
+    };
+  }
+
+  String? _isoFromMs(Object? value) {
+    if (value is! int) {
+      return null;
+    }
+    return DateTime.fromMillisecondsSinceEpoch(value).toIso8601String();
+  }
+
+  List<String> _qualityLabels(int flags) {
+    final labels = <String>[];
+    if (flags & 0x01 != 0) {
+      labels.add('skin_contact');
+    }
+    if (flags & 0x02 != 0) {
+      labels.add('motion_artifact');
+    }
+    if (flags & 0x04 != 0) {
+      labels.add('low_perfusion');
+    }
+    if (flags & 0x08 != 0) {
+      labels.add('puck_changed');
+    }
+    if (flags & 0x10 != 0) {
+      labels.add('battery_low');
+    }
+    if (flags & 0x20 != 0) {
+      labels.add('ppg_clipping');
+    }
+    if (flags & 0x40 != 0) {
+      labels.add('uncalibrated');
+    }
+    return labels;
+  }
+
+  Map<String, Object?> _ppgPayloadSummary(String payloadHex) {
+    final bytes = _hexToBytes(payloadHex);
+    final channels = <int, _PpgChannelStats>{};
+    var malformedTailBytes = bytes.length % 3;
+
+    for (var i = 0; i + 2 < bytes.length; i += 3) {
+      final tag = bytes[i] >> 3;
+      final value =
+          ((bytes[i] & 0x07) << 16) | (bytes[i + 1] << 8) | bytes[i + 2];
+      channels.putIfAbsent(tag, _PpgChannelStats.new).add(value);
+    }
+
+    return {
+      'payload_bytes': bytes.length,
+      'malformed_tail_bytes': malformedTailBytes,
+      'legacy': channels[0]?.toJson(),
+      'green': channels[1]?.toJson(),
+      'ir': channels[2]?.toJson(),
+      'red': channels[3]?.toJson(),
+      'unknown_tags': {
+        for (final entry in channels.entries)
+          if (entry.key > 3) entry.key.toString(): entry.value.toJson(),
+      },
+    };
+  }
+
+  List<int> _hexToBytes(String hex) {
+    final bytes = <int>[];
+    for (var i = 0; i + 1 < hex.length; i += 2) {
+      final byte = int.tryParse(hex.substring(i, i + 2), radix: 16);
+      if (byte != null) {
+        bytes.add(byte);
+      }
+    }
+    return bytes;
+  }
+
   int _countDaysWithCleanIbi(Database db) {
     final rows = db.select('''
       SELECT date(wall_time_ms / 1000, 'unixepoch') AS day, COUNT(*) AS count
@@ -804,5 +1052,39 @@ class OpenPulseStorage {
   void dispose() {
     _db?.dispose();
     _db = null;
+  }
+}
+
+class _PpgChannelStats {
+  int count = 0;
+  int? min;
+  int? max;
+  int sum = 0;
+  final List<int> firstSamples = [];
+  final List<int> lastSamples = [];
+
+  void add(int value) {
+    count++;
+    min = min == null ? value : math.min(min!, value);
+    max = max == null ? value : math.max(max!, value);
+    sum += value;
+    if (firstSamples.length < 12) {
+      firstSamples.add(value);
+    }
+    lastSamples.add(value);
+    if (lastSamples.length > 12) {
+      lastSamples.removeAt(0);
+    }
+  }
+
+  Map<String, Object?> toJson() {
+    return {
+      'count': count,
+      'min': min,
+      'max': max,
+      'mean': count == 0 ? null : sum / count,
+      'first_samples': firstSamples,
+      'last_samples': lastSamples,
+    };
   }
 }
