@@ -250,7 +250,12 @@ class TodayView extends StatelessWidget {
           ],
         ),
         const SizedBox(height: 18),
-        _CalibrationPanel(live: live, hrv: hrv, compact: true),
+        _CalibrationPanel(
+          live: live,
+          hrv: hrv,
+          timeline: controller.calibrationTimeline,
+          compact: true,
+        ),
         const SizedBox(height: 18),
         _MetricStrip(
           items: [
@@ -542,7 +547,12 @@ class LiveView extends StatelessWidget {
           ],
         ),
         const SizedBox(height: 18),
-        _CalibrationPanel(live: live, hrv: hrv, compact: false),
+        _CalibrationPanel(
+          live: live,
+          hrv: hrv,
+          timeline: controller.calibrationTimeline,
+          compact: false,
+        ),
         const SizedBox(height: 18),
         _Surface(
           child: Column(
@@ -1026,109 +1036,429 @@ class _MetricRing extends StatelessWidget {
   }
 }
 
-class _CalibrationPanel extends StatelessWidget {
+class _CalibrationPanel extends StatefulWidget {
   const _CalibrationPanel({
     required this.live,
     required this.hrv,
+    required this.timeline,
     required this.compact,
   });
 
   final LiveRecord? live;
   final HrvSummary? hrv;
+  final CalibrationTimeline? timeline;
   final bool compact;
 
   @override
+  State<_CalibrationPanel> createState() => _CalibrationPanelState();
+}
+
+class _CalibrationPanelState extends State<_CalibrationPanel> {
+  bool _expanded = false;
+  Timer? _countdownTimer;
+
+  @override
+  void initState() {
+    super.initState();
+    _countdownTimer = Timer.periodic(const Duration(seconds: 30), (_) {
+      if (mounted) {
+        setState(() {});
+      }
+    });
+  }
+
+  @override
+  void dispose() {
+    _countdownTimer?.cancel();
+    super.dispose();
+  }
+
+  @override
   Widget build(BuildContext context) {
-    final opticalProgress = _normalizedPercent(live?.calibrationProgress);
-    final hrProgress = _normalizedPercent(live?.hrConfidence);
-    final spo2Progress = _normalizedPercent(live?.spo2Confidence);
-    final hrvProgress = _normalizedPercent(hrv?.calibrationProgress);
-    final opticalPercent = _percent(live?.calibrationProgress);
-    final hrvPercent = _percent(hrv?.calibrationProgress);
+    final opticalProgress = _normalizedPercent(
+      widget.live?.calibrationProgress,
+    );
+    final hrProgress = _normalizedPercent(widget.live?.hrConfidence);
+    final spo2Progress = _normalizedPercent(widget.live?.spo2Confidence);
+    final hrvProgress = _normalizedPercent(widget.hrv?.calibrationProgress);
+    final opticalPercent = _percent(widget.live?.calibrationProgress);
+    final hrvPercent = _percent(widget.hrv?.calibrationProgress);
 
     return _Surface(
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Row(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Container(
-                width: 44,
-                height: 44,
-                decoration: const BoxDecoration(
-                  shape: BoxShape.circle,
-                  color: _surface2,
+      child: AnimatedSize(
+        duration: const Duration(milliseconds: 220),
+        curve: Curves.easeOutCubic,
+        alignment: Alignment.topCenter,
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Container(
+                  width: 44,
+                  height: 44,
+                  decoration: const BoxDecoration(
+                    shape: BoxShape.circle,
+                    color: _surface2,
+                  ),
+                  child: const Icon(Icons.auto_graph_rounded, color: _mint),
                 ),
-                child: const Icon(Icons.auto_graph_rounded, color: _mint),
-              ),
-              const SizedBox(width: 14),
-              Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
+                const SizedBox(width: 14),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      const Text(
+                        'Calibration',
+                        style: TextStyle(
+                          fontSize: 20,
+                          fontWeight: FontWeight.w900,
+                        ),
+                      ),
+                      const SizedBox(height: 4),
+                      Text(
+                        _calibrationPhase(widget.live?.calibrationProgress),
+                        style: const TextStyle(color: _muted, height: 1.25),
+                      ),
+                      const SizedBox(height: 8),
+                      Text(
+                        _nextCalibrationLabel(widget.timeline),
+                        style: const TextStyle(
+                          color: _mint,
+                          fontWeight: FontWeight.w900,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+                const SizedBox(width: 10),
+                Column(
+                  crossAxisAlignment: CrossAxisAlignment.end,
                   children: [
                     Text(
-                      'Calibration',
+                      opticalPercent,
                       style: const TextStyle(
-                        fontSize: 20,
+                        fontSize: 26,
                         fontWeight: FontWeight.w900,
                       ),
                     ),
                     const SizedBox(height: 4),
-                    Text(
-                      _calibrationPhase(live?.calibrationProgress),
-                      style: const TextStyle(color: _muted, height: 1.25),
+                    IconButton.filledTonal(
+                      visualDensity: VisualDensity.compact,
+                      tooltip: _expanded ? 'Collapse' : 'Expand',
+                      onPressed: () {
+                        setState(() => _expanded = !_expanded);
+                      },
+                      icon: Icon(
+                        _expanded
+                            ? Icons.expand_less_rounded
+                            : Icons.expand_more_rounded,
+                      ),
                     ),
                   ],
                 ),
-              ),
-              Text(
-                opticalPercent,
-                style: const TextStyle(
-                  fontSize: 26,
-                  fontWeight: FontWeight.w900,
-                ),
-              ),
-            ],
-          ),
-          const SizedBox(height: 18),
-          _ProgressLine(
-            value: opticalProgress,
-            color: _mint,
-            label: 'Optical profile',
-            trailing:
-                '$opticalPercent · ${_calibrationShortLabel(live?.calibrationProgress)}',
-          ),
-          const SizedBox(height: 12),
-          _ProgressLine(
-            value: hrProgress,
-            color: _red,
-            label: 'HR confidence',
-            trailing: live?.hrConfidenceLabel ?? 'waiting',
-          ),
-          const SizedBox(height: 12),
-          _ProgressLine(
-            value: spo2Progress,
-            color: _amber,
-            label: 'SpO2 confidence',
-            trailing: live?.spo2ConfidenceLabel ?? 'waiting',
-          ),
-          if (!compact) ...[
+              ],
+            ),
+            const SizedBox(height: 18),
+            _ProgressLine(
+              value: opticalProgress,
+              color: _mint,
+              label: 'Optical profile',
+              trailing:
+                  '$opticalPercent · ${_calibrationShortLabel(widget.live?.calibrationProgress)}',
+            ),
             const SizedBox(height: 12),
             _ProgressLine(
-              value: hrvProgress,
-              color: _blue,
-              label: 'HRV baseline',
-              trailing: '$hrvPercent · ${hrv?.status ?? 'needs IBI'}',
+              value: hrProgress,
+              color: _red,
+              label: 'HR confidence',
+              trailing: widget.live?.hrConfidenceLabel ?? 'waiting',
             ),
-            const SizedBox(height: 14),
-            _CalibrationLegend(
-              opticalProgress: live?.calibrationProgress,
-              hrvProgress: hrv?.calibrationProgress,
+            const SizedBox(height: 12),
+            _ProgressLine(
+              value: spo2Progress,
+              color: _amber,
+              label: 'SpO2 confidence',
+              trailing: widget.live?.spo2ConfidenceLabel ?? 'waiting',
             ),
+            if (!widget.compact || _expanded) ...[
+              const SizedBox(height: 12),
+              _ProgressLine(
+                value: hrvProgress,
+                color: _blue,
+                label: 'HRV baseline',
+                trailing: '$hrvPercent · ${widget.hrv?.status ?? 'needs IBI'}',
+              ),
+              const SizedBox(height: 14),
+              _CalibrationLegend(
+                opticalProgress: widget.live?.calibrationProgress,
+                hrvProgress: widget.hrv?.calibrationProgress,
+              ),
+            ],
+            if (_expanded) ...[
+              const SizedBox(height: 18),
+              SizedBox(
+                height: 224,
+                child: _CalibrationTimelinePlot(timeline: widget.timeline),
+              ),
+              const SizedBox(height: 12),
+              const _CalibrationPlotLegend(),
+            ],
           ],
-        ],
+        ),
       ),
+    );
+  }
+}
+
+class _CalibrationTimelinePlot extends StatelessWidget {
+  const _CalibrationTimelinePlot({required this.timeline});
+
+  final CalibrationTimeline? timeline;
+
+  @override
+  Widget build(BuildContext context) {
+    return CustomPaint(
+      painter: _CalibrationTimelinePainter(timeline: timeline),
+      child: const SizedBox.expand(),
+    );
+  }
+}
+
+class _CalibrationTimelinePainter extends CustomPainter {
+  const _CalibrationTimelinePainter({required this.timeline});
+
+  final CalibrationTimeline? timeline;
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final plot = Offset.zero & size;
+    final gridPaint = Paint()
+      ..color = _line
+      ..strokeWidth = 1;
+    for (var i = 1; i < 4; i++) {
+      final y = plot.top + plot.height * i / 4;
+      canvas.drawLine(Offset(plot.left, y), Offset(plot.right, y), gridPaint);
+    }
+
+    final points = timeline?.points ?? const <CalibrationTimelinePoint>[];
+    if (points.length < 2) {
+      _paintCenteredLabel(canvas, size, 'Waiting for calibration samples');
+      return;
+    }
+
+    final start = points.first.time.millisecondsSinceEpoch;
+    final end = points.last.time.millisecondsSinceEpoch;
+    final spanMs = math.max(1, end - start);
+
+    double xFor(DateTime time) {
+      final offset = time.millisecondsSinceEpoch - start;
+      return plot.left + (offset / spanMs) * plot.width;
+    }
+
+    final hrValues = [for (final point in points) point.heartRateBpm];
+    final spo2Values = [
+      for (final point in points) point.spo2Percent?.toDouble(),
+    ];
+    final hrvValues = [for (final point in points) point.hrvRmssdMs];
+
+    _drawSeries(
+      canvas: canvas,
+      plot: plot,
+      points: points,
+      values: hrValues,
+      color: _red,
+      xFor: xFor,
+    );
+    _drawSeries(
+      canvas: canvas,
+      plot: plot,
+      points: points,
+      values: spo2Values,
+      color: _amber,
+      xFor: xFor,
+    );
+    _drawSeries(
+      canvas: canvas,
+      plot: plot,
+      points: points,
+      values: hrvValues,
+      color: _blue,
+      xFor: xFor,
+    );
+
+    final marks = timeline?.updateMarks ?? const <CalibrationUpdateMark>[];
+    for (var i = 0; i < marks.length; i++) {
+      final mark = marks[i];
+      if (mark.time.isBefore(points.first.time) ||
+          mark.time.isAfter(points.last.time)) {
+        continue;
+      }
+      final x = xFor(mark.time).clamp(plot.left, plot.right).toDouble();
+      final markPaint = Paint()
+        ..color = _mint.withValues(alpha: 0.72)
+        ..strokeWidth = 1.4
+        ..strokeCap = StrokeCap.round;
+      var y = plot.top + 4;
+      while (y < plot.bottom - 4) {
+        canvas.drawLine(
+          Offset(x, y),
+          Offset(x, math.min(y + 7, plot.bottom - 4)),
+          markPaint,
+        );
+        y += 13;
+      }
+      canvas.drawCircle(Offset(x, plot.top + 7), 3.5, Paint()..color = _mint);
+      if (marks.length <= 6 || i == marks.length - 1 || i == 0) {
+        final label = '${mark.progress}%';
+        final textPainter = TextPainter(
+          text: TextSpan(
+            text: label,
+            style: const TextStyle(
+              color: _mint,
+              fontSize: 10,
+              fontWeight: FontWeight.w800,
+            ),
+          ),
+          textDirection: TextDirection.ltr,
+        )..layout();
+        final labelX = (x + 5).clamp(
+          plot.left,
+          math.max(plot.left, plot.right - textPainter.width),
+        );
+        textPainter.paint(canvas, Offset(labelX.toDouble(), plot.top + 8));
+      }
+    }
+
+    _paintAxisLabel(canvas, size, points.first.time, Alignment.bottomLeft);
+    _paintAxisLabel(canvas, size, points.last.time, Alignment.bottomRight);
+  }
+
+  void _drawSeries({
+    required Canvas canvas,
+    required Rect plot,
+    required List<CalibrationTimelinePoint> points,
+    required List<double?> values,
+    required Color color,
+    required double Function(DateTime time) xFor,
+  }) {
+    final clean = values
+        .whereType<double>()
+        .where((value) {
+          return value.isFinite && value > 0;
+        })
+        .toList(growable: false);
+    if (clean.length < 2) {
+      return;
+    }
+
+    final minValue = clean.reduce(math.min);
+    final maxValue = clean.reduce(math.max);
+    final span = math.max(1.0, maxValue - minValue);
+    final path = Path();
+    var drawing = false;
+
+    for (var i = 0; i < points.length; i++) {
+      final value = values[i];
+      if (value == null || !value.isFinite || value <= 0) {
+        drawing = false;
+        continue;
+      }
+      final normalized = ((value - minValue) / span).clamp(0.0, 1.0);
+      final x = xFor(points[i].time);
+      final y = plot.bottom - normalized * plot.height;
+      if (!drawing) {
+        path.moveTo(x, y);
+        drawing = true;
+      } else {
+        path.lineTo(x, y);
+      }
+    }
+
+    canvas.drawPath(
+      path,
+      Paint()
+        ..color = color
+        ..strokeWidth = 2.4
+        ..strokeCap = StrokeCap.round
+        ..strokeJoin = StrokeJoin.round
+        ..style = PaintingStyle.stroke,
+    );
+  }
+
+  void _paintCenteredLabel(Canvas canvas, Size size, String label) {
+    final textPainter = TextPainter(
+      text: TextSpan(
+        text: label,
+        style: const TextStyle(color: _muted, fontSize: 14),
+      ),
+      textDirection: TextDirection.ltr,
+    )..layout(maxWidth: size.width);
+    textPainter.paint(
+      canvas,
+      Offset(
+        (size.width - textPainter.width) / 2,
+        (size.height - textPainter.height) / 2,
+      ),
+    );
+  }
+
+  void _paintAxisLabel(
+    Canvas canvas,
+    Size size,
+    DateTime time,
+    Alignment alignment,
+  ) {
+    final textPainter = TextPainter(
+      text: TextSpan(
+        text: _clock(time),
+        style: const TextStyle(color: _muted, fontSize: 10),
+      ),
+      textDirection: TextDirection.ltr,
+    )..layout(maxWidth: size.width / 2);
+    final x = alignment == Alignment.bottomLeft
+        ? 0.0
+        : size.width - textPainter.width;
+    textPainter.paint(canvas, Offset(x, size.height - textPainter.height));
+  }
+
+  @override
+  bool shouldRepaint(covariant _CalibrationTimelinePainter oldDelegate) {
+    return oldDelegate.timeline != timeline;
+  }
+}
+
+class _CalibrationPlotLegend extends StatelessWidget {
+  const _CalibrationPlotLegend();
+
+  @override
+  Widget build(BuildContext context) {
+    return const Wrap(
+      spacing: 10,
+      runSpacing: 10,
+      children: [
+        _CalibrationChip(
+          icon: Icons.favorite_rounded,
+          label: 'HR',
+          color: _red,
+        ),
+        _CalibrationChip(
+          icon: Icons.opacity_rounded,
+          label: 'SpO2',
+          color: _amber,
+        ),
+        _CalibrationChip(
+          icon: Icons.monitor_heart_rounded,
+          label: 'HRV',
+          color: _blue,
+        ),
+        _CalibrationChip(
+          icon: Icons.update_rounded,
+          label: 'Calibration update',
+          color: _mint,
+        ),
+      ],
     );
   }
 }
@@ -1733,6 +2063,30 @@ double _normalizedPercent(int? value) {
 
 String _percent(int? value) {
   return '${(value ?? 0).clamp(0, 100)}%';
+}
+
+String _nextCalibrationLabel(CalibrationTimeline? timeline) {
+  if (timeline == null || !timeline.hasData) {
+    return 'Next update in -- min';
+  }
+  final progress = timeline.latestProgress;
+  if (progress != null && progress >= 100) {
+    return 'Profile ready';
+  }
+  final nextUpdateAt = timeline.nextUpdateAt;
+  final remaining = nextUpdateAt == null
+      ? timeline.nextUpdateRemaining
+      : nextUpdateAt.isBefore(DateTime.now())
+      ? Duration.zero
+      : nextUpdateAt.difference(DateTime.now());
+  if (remaining == null) {
+    return 'Next update in -- min';
+  }
+  final minutes = (remaining.inSeconds / 60).ceil().clamp(0, 999);
+  if (minutes <= 0) {
+    return 'Next update now';
+  }
+  return 'Next update in $minutes min';
 }
 
 String _calibrationShortLabel(int? value) {

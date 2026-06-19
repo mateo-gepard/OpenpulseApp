@@ -124,6 +124,47 @@ class HrvSummary {
   bool get available => rmssdMs != null && cleanIbiCount >= 8;
 }
 
+class CalibrationTimelinePoint {
+  const CalibrationTimelinePoint({
+    required this.time,
+    required this.heartRateBpm,
+    required this.spo2Percent,
+    required this.hrvRmssdMs,
+    required this.calibrationProgress,
+  });
+
+  final DateTime time;
+  final double? heartRateBpm;
+  final int? spo2Percent;
+  final double? hrvRmssdMs;
+  final int? calibrationProgress;
+}
+
+class CalibrationUpdateMark {
+  const CalibrationUpdateMark({required this.time, required this.progress});
+
+  final DateTime time;
+  final int progress;
+}
+
+class CalibrationTimeline {
+  const CalibrationTimeline({
+    required this.points,
+    required this.updateMarks,
+    required this.nextUpdateAt,
+    required this.nextUpdateRemaining,
+    required this.latestProgress,
+  });
+
+  final List<CalibrationTimelinePoint> points;
+  final List<CalibrationUpdateMark> updateMarks;
+  final DateTime? nextUpdateAt;
+  final Duration? nextUpdateRemaining;
+  final int? latestProgress;
+
+  bool get hasData => points.isNotEmpty;
+}
+
 class PuckStatus {
   const PuckStatus({
     required this.receivedAt,

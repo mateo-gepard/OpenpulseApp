@@ -35,6 +35,7 @@ class OpenPulseController extends ChangeNotifier {
   DateTime selectedDay = DateTime.now();
   DaySummary? selectedDaySummary;
   HrvSummary? latestHrvSummary;
+  CalibrationTimeline? calibrationTimeline;
   DeviceMode selectedMode = DeviceMode.active;
   int samplingHz = 64;
   int ledGreenMa = 12;
@@ -105,6 +106,7 @@ class OpenPulseController extends ChangeNotifier {
       storageReady = true;
       _refreshSelectedDay();
       _refreshHrvSummary();
+      _refreshCalibrationTimeline();
       try {
         await notifications.initialize();
         notificationsReady = notifications.ready;
@@ -849,6 +851,7 @@ class OpenPulseController extends ChangeNotifier {
     ].takeLast(90).toList(growable: false);
     _refreshSelectedDay();
     _refreshHrvSummary();
+    _refreshCalibrationTimeline();
     final steps = latestLiveRecord?.stepCount;
     if (steps != null) {
       if (steps < stepGoal) {
@@ -993,6 +996,13 @@ class OpenPulseController extends ChangeNotifier {
       return;
     }
     latestHrvSummary = storage.fetchHrvSummary();
+  }
+
+  void _refreshCalibrationTimeline() {
+    if (!storageReady) {
+      return;
+    }
+    calibrationTimeline = storage.fetchCalibrationTimeline();
   }
 
   void _notifyStepGoalIfNeeded(int steps) {

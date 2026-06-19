@@ -565,6 +565,179 @@ class OpenPulseStorage {
     );
   }
 
+  CalibrationTimeline fetchCalibrationTimeline({
+    Duration window = const Duration(hours: 3),
+  }) {
+    final db = _requireDb();
+    final now = DateTime.now();
+    final nowMs = now.millisecondsSinceEpoch;
+    final startMs = nowMs - window.inMilliseconds;
+    final rows = db.select(
+      '''
+      SELECT wall_time_ms,
+             heart_rate_x10,
+             ibi_ms,
+             spo2_percent,
+             quality_flags,
+             hr_confidence,
+             calibration_progress
+      FROM live_records
+      WHERE wall_time_ms >= ?
+      ORDER BY wall_time_ms ASC
+      ''',
+      [startMs],
+    );
+
+    final points = <CalibrationTimelinePoint>[];
+    final marks = <CalibrationUpdateMark>[];
+    final cleanIbis = <({int timeMs, int ibi})>[];
+    int? previousProgress;
+    int? latestProgress;
+
+    for (final row in rows) {
+      final timeMs = row['wall_time_ms'] as int;
+      final hrX10 = row['heart_rate_x10'] as int?;
+      final ibi = row['ibi_ms'] as int?;
+      final spo2 = row['spo2_percent'] as int?;
+      final quality = row['quality_flags'] as int? ?? 0;
+      final hrConfidence = row['hr_confidence'] as int?;
+      final progress = row['calibration_progress'] as int?;
+      final motionArtifact = quality & 0x02 != 0;
+      final lowPerfusion = quality & 0x04 != 0;
+      final clipping = quality & 0x20 != 0;
+      final trustedIbi =
+          ibi != null &&
+          (hrConfidence ?? 0) >= 55 &&
+          !motionArtifact &&
+          !lowPerfusion &&
+          !clipping &&
+          ibi >= 333 &&
+          ibi <= 2000;
+
+      if (trustedIbi) {
+        cleanIbis.add((timeMs: timeMs, ibi: ibi));
+      }
+      cleanIbis.removeWhere(
+        (sample) =>
+            timeMs - sample.timeMs > const Duration(minutes: 5).inMilliseconds,
+      );
+
+      double? hrvRmssd;
+      if (cleanIbis.length >= 8) {
+        var diffSquares = 0.0;
+        var diffs = 0;
+        for (var i = 1; i < cleanIbis.length; i++) {
+          final diff = cleanIbis[i].ibi - cleanIbis[i - 1].ibi;
+          if (diff.abs() > 350 || diff.abs() > cleanIbis[i - 1].ibi * 0.28) {
+            continue;
+          }
+          diffSquares += diff * diff;
+          diffs++;
+        }
+        if (diffs >= 4) {
+          hrvRmssd = math.sqrt(diffSquares / diffs);
+        }
+      }
+
+      if (progress != null) {
+        latestProgress = progress;
+        if (previousProgress != null && progress > previousProgress) {
+          marks.add(
+            CalibrationUpdateMark(
+              time: DateTime.fromMillisecondsSinceEpoch(timeMs),
+              progress: progress,
+            ),
+          );
+        }
+        previousProgress = progress;
+      }
+
+      points.add(
+        CalibrationTimelinePoint(
+          time: DateTime.fromMillisecondsSinceEpoch(timeMs),
+          heartRateBpm: hrX10 == null ? null : hrX10 / 10.0,
+          spo2Percent: spo2,
+          hrvRmssdMs: hrvRmssd,
+          calibrationProgress: progress,
+        ),
+      );
+    }
+
+    final sampledPoints = _downsampleCalibrationPoints(points, maxPoints: 360);
+    final nextUpdateAt = _estimateNextCalibrationUpdate(
+      points: points,
+      marks: marks,
+      latestProgress: latestProgress,
+    );
+    final nextUpdateRemaining = nextUpdateAt == null
+        ? null
+        : nextUpdateAt.isBefore(now)
+        ? Duration.zero
+        : nextUpdateAt.difference(now);
+
+    return CalibrationTimeline(
+      points: sampledPoints,
+      updateMarks: marks,
+      nextUpdateAt: nextUpdateAt,
+      nextUpdateRemaining: nextUpdateRemaining,
+      latestProgress: latestProgress,
+    );
+  }
+
+  List<CalibrationTimelinePoint> _downsampleCalibrationPoints(
+    List<CalibrationTimelinePoint> points, {
+    required int maxPoints,
+  }) {
+    if (points.length <= maxPoints) {
+      return List.unmodifiable(points);
+    }
+    final stride = (points.length / maxPoints).ceil();
+    final sampled = <CalibrationTimelinePoint>[];
+    for (var i = 0; i < points.length; i += stride) {
+      sampled.add(points[i]);
+    }
+    if (sampled.last.time != points.last.time) {
+      sampled.add(points.last);
+    }
+    return List.unmodifiable(sampled);
+  }
+
+  DateTime? _estimateNextCalibrationUpdate({
+    required List<CalibrationTimelinePoint> points,
+    required List<CalibrationUpdateMark> marks,
+    required int? latestProgress,
+  }) {
+    if (points.isEmpty || latestProgress == null || latestProgress >= 100) {
+      return null;
+    }
+
+    final latestTime = points.last.time;
+    if (latestProgress < 30) {
+      final elapsedMs =
+          (latestProgress / 30.0) * const Duration(minutes: 2).inMilliseconds;
+      final estimatedStart = latestTime.subtract(
+        Duration(milliseconds: elapsedMs.round()),
+      );
+      return estimatedStart.add(const Duration(minutes: 2));
+    }
+
+    CalibrationUpdateMark? lastProgressMark;
+    for (final mark in marks.reversed) {
+      if (mark.progress == latestProgress) {
+        lastProgressMark = mark;
+        break;
+      }
+    }
+    lastProgressMark ??= marks.isNotEmpty
+        ? marks.last
+        : CalibrationUpdateMark(
+            time: points.first.time,
+            progress: latestProgress,
+          );
+
+    return lastProgressMark.time.add(const Duration(hours: 1));
+  }
+
   int _countDaysWithCleanIbi(Database db) {
     final rows = db.select('''
       SELECT date(wall_time_ms / 1000, 'unixepoch') AS day, COUNT(*) AS count
