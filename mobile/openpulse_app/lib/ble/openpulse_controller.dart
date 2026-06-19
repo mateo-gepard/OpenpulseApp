@@ -40,6 +40,7 @@ class OpenPulseController extends ChangeNotifier {
   int ledRedMa = 4;
   int ledIrMa = 4;
   int stepGoal = 10000;
+  bool rawPpgDiagnosticEnabled = false;
   bool storageReady = false;
   bool notificationsReady = false;
   bool notificationPermissionGranted = false;
@@ -71,6 +72,10 @@ class OpenPulseController extends ChangeNotifier {
   int _syncedDeviceUptimeMs = 0;
   Timer? _rawPollTimer;
   Timer? _autoScanRetryTimer;
+  int? _savedSamplingHzBeforeRaw;
+  int? _savedLedGreenMaBeforeRaw;
+  int? _savedLedRedMaBeforeRaw;
+  int? _savedLedIrMaBeforeRaw;
 
   int? get currentStepCount => latestLiveRecord?.stepCount;
 
@@ -270,32 +275,85 @@ class OpenPulseController extends ChangeNotifier {
     );
   }
 
-  Future<void> requestRawPpgWindow() async {
-    await _writeControl(OpenPulseBleContract.buildRequestRawWindow(10));
+  Future<void> requestRawPpgWindow({int seconds = 1}) async {
+    await _writeControl(OpenPulseBleContract.buildRequestRawWindow(seconds));
   }
 
-  Future<void> _startRawPpgSampling() async {
+  Future<void> startRawPpgDiagnostics() async {
     if (!customServiceReady || !rawPpgReady) {
       return;
     }
+    if (rawPpgDiagnosticEnabled) {
+      return;
+    }
+
+    _savedSamplingHzBeforeRaw = samplingHz;
+    _savedLedGreenMaBeforeRaw = ledGreenMa;
+    _savedLedRedMaBeforeRaw = ledRedMa;
+    _savedLedIrMaBeforeRaw = ledIrMa;
+    rawPpgDiagnosticEnabled = true;
+    recentRawPpgSamples = const [];
+    latestRawPpgFrame = null;
+    notifyListeners();
+
     try {
-      await _writeControl(
-        OpenPulseBleContract.buildSetLedCurrent(
-          greenMa: ledGreenMa,
-          redMa: ledRedMa,
-          irMa: ledIrMa,
-        ),
-      );
-      await Future<void>.delayed(const Duration(milliseconds: 1200));
-      await requestRawPpgWindow();
+      await writeSampling(128);
+      await writeLed(greenMa: 16, redMa: 0, irMa: 0);
+      await Future<void>.delayed(const Duration(milliseconds: 180));
+      await requestRawPpgWindow(seconds: 1);
       _rawPollTimer?.cancel();
-      _rawPollTimer = Timer.periodic(const Duration(seconds: 5), (_) {
-        if (phase == ConnectionPhase.streaming && customServiceReady) {
-          unawaited(requestRawPpgWindow());
+      _rawPollTimer = Timer.periodic(const Duration(milliseconds: 250), (_) {
+        if (rawPpgDiagnosticEnabled &&
+            phase == ConnectionPhase.streaming &&
+            customServiceReady) {
+          unawaited(requestRawPpgWindow(seconds: 1));
         }
       });
+    } catch (error) {
+      rawPpgDiagnosticEnabled = false;
+      statusMessage = 'Raw PPG diagnostic could not start: $error';
+      notifyListeners();
+    }
+  }
+
+  Future<void> stopRawPpgDiagnostics() async {
+    if (!rawPpgDiagnosticEnabled && _rawPollTimer == null) {
+      return;
+    }
+    _rawPollTimer?.cancel();
+    _rawPollTimer = null;
+    rawPpgDiagnosticEnabled = false;
+    notifyListeners();
+
+    if (!customServiceReady) {
+      _clearSavedRawSettings();
+      return;
+    }
+
+    try {
+      await requestRawPpgWindow(seconds: 0);
+      final previousSamplingHz = _savedSamplingHzBeforeRaw;
+      final previousGreenMa = _savedLedGreenMaBeforeRaw;
+      final previousRedMa = _savedLedRedMaBeforeRaw;
+      final previousIrMa = _savedLedIrMaBeforeRaw;
+      if (previousSamplingHz != null) {
+        await writeSampling(previousSamplingHz);
+      }
+      if (previousGreenMa != null &&
+          previousRedMa != null &&
+          previousIrMa != null) {
+        await writeLed(
+          greenMa: previousGreenMa,
+          redMa: previousRedMa,
+          irMa: previousIrMa,
+        );
+      }
+      statusMessage = 'Raw PPG diagnostic stopped.';
     } catch (_) {
       // Raw PPG can fail independently; puck status remains the hardware truth.
+    } finally {
+      _clearSavedRawSettings();
+      notifyListeners();
     }
   }
 
@@ -376,7 +434,6 @@ class OpenPulseController extends ChangeNotifier {
       await _timeSync();
 
       _setPhase(ConnectionPhase.streaming, 'OpenPulse is connected and live.');
-      unawaited(_startRawPpgSampling());
     } catch (error) {
       _clearGatt();
       _setPhase(ConnectionPhase.error, 'BLE connection failed: $error');
@@ -715,7 +772,7 @@ class OpenPulseController extends ChangeNotifier {
       recentRawPpgSamples = [
         ...recentRawPpgSamples,
         ...frame.samples,
-      ].takeLast(160).toList(growable: false);
+      ].takeLast(420).toList(growable: false);
     }
     _refreshSelectedDay();
     statusMessage = frame.payloadLength > 0
@@ -764,6 +821,8 @@ class OpenPulseController extends ChangeNotifier {
   void _clearGatt({bool closeSession = true}) {
     _rawPollTimer?.cancel();
     _rawPollTimer = null;
+    rawPpgDiagnosticEnabled = false;
+    _clearSavedRawSettings();
     if (closeSession) {
       storage.closeSession(_sessionId);
     }
@@ -816,6 +875,13 @@ class OpenPulseController extends ChangeNotifier {
     }
     stepGoalNotified = true;
     unawaited(notifications.stepGoalReached(steps: steps, goal: stepGoal));
+  }
+
+  void _clearSavedRawSettings() {
+    _savedSamplingHzBeforeRaw = null;
+    _savedLedGreenMaBeforeRaw = null;
+    _savedLedRedMaBeforeRaw = null;
+    _savedLedIrMaBeforeRaw = null;
   }
 
   @override

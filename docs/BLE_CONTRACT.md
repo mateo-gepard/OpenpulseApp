@@ -48,7 +48,7 @@ Commands:
 | `0x03` | Set PPG Sampling | `uint16 hz` |
 | `0x04` | Set LED Current | `uint8 green_ma`, `uint8 red_ma`, `uint8 ir_ma` |
 | `0x05` | Request Backfill | `uint64 from_device_uptime_ms` |
-| `0x06` | Request Raw PPG Window | `uint16 seconds` |
+| `0x06` | Request Raw PPG Window | `uint16 seconds`; `0` stops raw PPG acquisition |
 | `0x07` | Enter Ship Mode | empty |
 
 Modes:
@@ -130,6 +130,9 @@ Record kinds:
 ## Raw PPG Frame
 
 The firmware sends this frame in response to `Request Raw PPG Window`.
+Apps should request raw windows only while an explicit diagnostic/live view is
+active because this path uses higher sensor and BLE duty cycle than the normal
+1 Hz live stream. A request with `seconds = 0` stops raw PPG acquisition.
 If the sensor is unavailable or no FIFO samples are ready, `payload length`
 is `0`; the status bytes still report the real hardware state.
 

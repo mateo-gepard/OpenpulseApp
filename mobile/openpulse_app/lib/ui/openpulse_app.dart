@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
@@ -109,7 +110,12 @@ class _OpenPulseShellState extends State<OpenPulseShell> {
           bottomNavigationBar: _BottomNav(
             selectedIndex: _tab,
             tabs: _tabs,
-            onSelected: (index) => setState(() => _tab = index),
+            onSelected: (index) {
+              if (index != 1) {
+                unawaited(controller.stopRawPpgDiagnostics());
+              }
+              setState(() => _tab = index);
+            },
           ),
         );
       },
@@ -189,7 +195,6 @@ class TodayView extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final live = controller.latestLiveRecord;
-    final raw = controller.latestRawPpgFrame;
     final battery = controller.latestBattery;
     final puck = controller.latestPuckStatus;
     final summary = controller.selectedDaySummary;
@@ -197,7 +202,6 @@ class TodayView extends StatelessWidget {
     final stepProgress = steps == null
         ? 0.0
         : (steps / controller.stepGoal).clamp(0.0, 1.0).toDouble();
-    final ppgOk = raw?.payloadLength != null && raw!.payloadLength > 0;
 
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
@@ -206,7 +210,6 @@ class TodayView extends StatelessWidget {
           controller: controller,
           steps: steps,
           stepProgress: stepProgress,
-          ppgOk: ppgOk,
         ),
         const SizedBox(height: 18),
         _RingRow(
@@ -227,30 +230,9 @@ class TodayView extends StatelessWidget {
                   : (controller.livePacketCount / 120).clamp(0.0, 1.0),
               color: _blue,
             ),
-            _MetricRing(
-              label: 'PPG',
-              value: ppgOk ? '${raw.payloadLength}' : '--',
-              footer: ppgOk ? 'bytes' : raw?.sensorLabel ?? 'waiting',
-              progress: ppgOk ? 1 : 0,
-              color: _red,
-            ),
           ],
         ),
         const SizedBox(height: 18),
-        _SectionTitle('Sensor signal'),
-        _Surface(
-          child: SizedBox(
-            height: 186,
-            child: _PpgPlot(
-              samples: controller.recentRawPpgSamples,
-              fallback: controller.recentLiveRecords
-                  .map((record) => record.accelMilliG ?? 0)
-                  .where((value) => value > 0)
-                  .toList(growable: false),
-            ),
-          ),
-        ),
-        const SizedBox(height: 14),
         _MetricStrip(
           items: [
             _StripItem(
@@ -286,10 +268,6 @@ class TodayView extends StatelessWidget {
                 summary?.liveRecords.toString() ?? 'Waiting',
               ),
               _FactRow(
-                'Raw PPG frames',
-                summary?.rawPpgFrames.toString() ?? 'Waiting',
-              ),
-              _FactRow(
                 'Last sync',
                 summary?.lastLiveAt == null
                     ? 'Waiting'
@@ -312,13 +290,11 @@ class _HeroPanel extends StatelessWidget {
     required this.controller,
     required this.steps,
     required this.stepProgress,
-    required this.ppgOk,
   });
 
   final OpenPulseController controller;
   final int? steps;
   final double stepProgress;
-  final bool ppgOk;
 
   @override
   Widget build(BuildContext context) {
@@ -389,13 +365,6 @@ class _HeroPanel extends StatelessWidget {
             label: 'Step goal',
             trailing: '${(stepProgress * 100).round()}%',
           ),
-          const SizedBox(height: 10),
-          _ProgressLine(
-            value: ppgOk ? 1 : 0,
-            color: _red,
-            label: 'PPG sensor',
-            trailing: ppgOk ? 'signal' : 'waiting',
-          ),
         ],
       ),
     );
@@ -411,14 +380,73 @@ class LiveView extends StatelessWidget {
   Widget build(BuildContext context) {
     final live = controller.latestLiveRecord;
     final raw = controller.latestRawPpgFrame;
+    final rawEnabled = controller.rawPpgDiagnosticEnabled;
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
+        _SectionTitle('High-rate optical'),
+        _Surface(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Row(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          rawEnabled
+                              ? 'Raw sensor mode is active'
+                              : 'Raw sensor mode is off',
+                          style: const TextStyle(
+                            fontSize: 22,
+                            fontWeight: FontWeight.w900,
+                          ),
+                        ),
+                        const SizedBox(height: 6),
+                        Text(
+                          rawEnabled
+                              ? 'Streaming single-channel green PPG at 128 Hz.'
+                              : 'Tap Start only when you want to inspect the optical waveform.',
+                          style: const TextStyle(color: _muted, height: 1.25),
+                        ),
+                      ],
+                    ),
+                  ),
+                  FilledButton.icon(
+                    onPressed: controller.customServiceReady
+                        ? rawEnabled
+                              ? controller.stopRawPpgDiagnostics
+                              : controller.startRawPpgDiagnostics
+                        : null,
+                    icon: Icon(rawEnabled ? Icons.stop_rounded : Icons.bolt),
+                    label: Text(rawEnabled ? 'Stop' : 'Start'),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 14),
+              _ProgressLine(
+                value: rawEnabled ? 1 : 0,
+                color: rawEnabled ? _red : _line,
+                label: 'Battery-heavy diagnostic',
+                trailing: rawEnabled ? 'on' : 'off',
+              ),
+            ],
+          ),
+        ),
+        const SizedBox(height: 18),
         _SectionTitle('Raw PPG output'),
         _Surface(
           child: SizedBox(
             height: 250,
-            child: _PpgPlot(samples: controller.recentRawPpgSamples),
+            child: _PpgPlot(
+              samples: rawEnabled ? controller.recentRawPpgSamples : const [],
+              emptyLabel: rawEnabled
+                  ? 'Waiting for high-rate PPG samples'
+                  : 'Start raw sensor mode to plot PPG',
+            ),
           ),
         ),
         const SizedBox(height: 18),
@@ -676,28 +704,15 @@ class DeviceView extends StatelessWidget {
                     : null,
               ),
               const SizedBox(height: 10),
-              Row(
-                children: [
-                  Expanded(
-                    child: OutlinedButton.icon(
-                      onPressed: controller.customServiceReady
-                          ? controller.requestRawPpgWindow
-                          : null,
-                      icon: const Icon(Icons.show_chart_rounded),
-                      label: const Text('Raw PPG'),
-                    ),
-                  ),
-                  const SizedBox(width: 10),
-                  Expanded(
-                    child: OutlinedButton.icon(
-                      onPressed: controller.customServiceReady
-                          ? controller.requestBackfill
-                          : null,
-                      icon: const Icon(Icons.sync_rounded),
-                      label: const Text('Backfill'),
-                    ),
-                  ),
-                ],
+              SizedBox(
+                width: double.infinity,
+                child: OutlinedButton.icon(
+                  onPressed: controller.customServiceReady
+                      ? controller.requestBackfill
+                      : null,
+                  icon: const Icon(Icons.sync_rounded),
+                  label: const Text('Backfill'),
+                ),
               ),
             ],
           ),
@@ -1186,19 +1201,21 @@ class _SliderRow extends StatelessWidget {
 }
 
 class _PpgPlot extends StatelessWidget {
-  const _PpgPlot({required this.samples, this.fallback = const []});
+  const _PpgPlot({
+    required this.samples,
+    this.emptyLabel = 'Waiting for PPG FIFO samples',
+  });
 
   final List<int> samples;
-  final List<int> fallback;
+  final String emptyLabel;
 
   @override
   Widget build(BuildContext context) {
-    final values = samples.isNotEmpty ? samples : fallback;
     return CustomPaint(
       painter: _LinePlotPainter(
-        values: values,
+        values: samples,
         color: samples.isNotEmpty ? _red : _mint,
-        emptyLabel: samples.isNotEmpty ? '' : 'Waiting for PPG FIFO samples',
+        emptyLabel: samples.isNotEmpty ? '' : emptyLabel,
       ),
       child: const SizedBox.expand(),
     );

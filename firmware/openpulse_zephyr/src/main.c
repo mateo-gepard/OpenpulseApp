@@ -66,7 +66,8 @@ LOG_MODULE_REGISTER(openpulse, LOG_LEVEL_INF);
 #define OP_LIVE_RECORD_BASE_LEN 12
 #define OP_LIVE_RECORD_ACTIVITY_LEN 17
 #define OP_RAW_FRAME_HEADER_LEN 8
-#define OP_RAW_MAX_PAYLOAD_BYTES 12
+#define OP_RAW_MAX_PAYLOAD_BYTES 180
+#define OP_RAW_SETTLE_MS 120
 
 #define OP_EVENT_ATTACHED 1
 #define OP_EVENT_REMOVED 2
@@ -106,9 +107,7 @@ static bool battery_notify_enabled;
 static bool time_synced;
 static uint64_t synced_unix_ms;
 static uint64_t synced_device_uptime_ms;
-static int64_t connected_at_ms;
 static int64_t last_app_activity_ms;
-static bool stale_connection_disconnect_requested;
 static enum op_mode current_mode = OP_MODE_STANDBY;
 static uint16_t live_sequence;
 static uint16_t bulk_sequence;
@@ -256,7 +255,9 @@ static int notify_battery(void)
 
 static int start_advertising(void);
 static int notify_puck_status(void);
+static uint8_t probe_maxm86161(void);
 static uint8_t prepare_maxm86161(void);
+static void stop_maxm86161(void);
 
 static ssize_t read_control(struct bt_conn *conn,
 			    const struct bt_gatt_attr *attr,
@@ -401,9 +402,16 @@ static ssize_t write_control(struct bt_conn *conn,
 			return BT_GATT_ERR(BT_ATT_ERR_INVALID_ATTRIBUTE_LEN);
 		}
 		pending_raw_seconds = sys_get_le16(payload);
+		if (pending_raw_seconds == 0) {
+			k_work_cancel_delayable(&raw_window_work);
+			stop_maxm86161();
+			send_raw_frame(0, probe_maxm86161(), NULL, 0);
+			notify_control_ack(command, 0);
+			break;
+		}
 		pending_raw_sensor_status = prepare_maxm86161();
 		if (pending_raw_sensor_status == OP_SENSOR_STATUS_OK) {
-			k_work_reschedule(&raw_window_work, K_MSEC(750));
+			k_work_reschedule(&raw_window_work, K_MSEC(OP_RAW_SETTLE_MS));
 		} else {
 			send_raw_frame(pending_raw_seconds, pending_raw_sensor_status, NULL, 0);
 		}
@@ -863,6 +871,22 @@ static uint8_t prepare_maxm86161(void)
 	return OP_SENSOR_STATUS_OK;
 }
 
+static void stop_maxm86161(void)
+{
+#if OPENPULSE_HAS_I2C
+	if (active_ppg_i2c == NULL && probe_maxm86161() != OP_SENSOR_STATUS_OK) {
+		maxm86161_configured = false;
+		return;
+	}
+
+	if (maxm86161_write_reg(MAXM86161_REG_SYSTEM_CONTROL,
+				MAXM86161_SYSTEM_SINGLE_PPG | MAXM86161_SYSTEM_SHDN)) {
+		LOG_WRN("MAXM86161 shutdown failed");
+	}
+	maxm86161_configured = false;
+#endif
+}
+
 static int read_maxm86161_fifo_payload(uint8_t *payload,
 				       uint8_t max_payload_len,
 				       uint8_t *payload_len)
@@ -1243,7 +1267,7 @@ static void sensor_work_handler(struct k_work *work)
 	uint8_t previous_attached = last_puck_status[2];
 
 	read_battery();
-	update_puck_status(prepare_maxm86161());
+	update_puck_status(probe_maxm86161());
 
 	if (previous_attached != last_puck_status[2]) {
 		last_puck_status[0] = last_puck_status[2] ? OP_EVENT_ATTACHED : OP_EVENT_REMOVED;
@@ -1276,16 +1300,7 @@ static void advertising_work_handler(struct k_work *work)
 
 	ARG_UNUSED(work);
 
-	if (current_conn) {
-		if (connected_at_ms > 0 &&
-		    last_app_activity_ms > 0 &&
-		    k_uptime_get() - last_app_activity_ms > 20000 &&
-		    !stale_connection_disconnect_requested) {
-			stale_connection_disconnect_requested = true;
-			LOG_WRN("BLE connection has no recent app activity; disconnecting");
-			(void)bt_conn_disconnect(current_conn, BT_HCI_ERR_REMOTE_USER_TERM_CONN);
-		}
-	} else {
+	if (!current_conn) {
 		err = start_advertising();
 		if (err == 0) {
 			LOG_INF("Advertising as OpenPulse");
@@ -1348,9 +1363,7 @@ static void connected(struct bt_conn *conn, uint8_t err)
 
 	current_conn = bt_conn_ref(conn);
 	time_synced = false;
-	connected_at_ms = k_uptime_get();
-	last_app_activity_ms = connected_at_ms;
-	stale_connection_disconnect_requested = false;
+	last_app_activity_ms = k_uptime_get();
 	LOG_INF("BLE connected");
 }
 
@@ -1369,9 +1382,8 @@ static void disconnected(struct bt_conn *conn, uint8_t reason)
 	puck_notify_enabled = false;
 	battery_notify_enabled = false;
 	time_synced = false;
-	connected_at_ms = 0;
 	last_app_activity_ms = 0;
-	stale_connection_disconnect_requested = false;
+	stop_maxm86161();
 
 	if (current_conn) {
 		bt_conn_unref(current_conn);
@@ -1432,7 +1444,7 @@ int main(void)
 	configure_motion_sensor();
 	sample_motion();
 	read_battery();
-	update_puck_status(prepare_maxm86161());
+	update_puck_status(probe_maxm86161());
 
 	err = bt_enable(NULL);
 	if (err) {
