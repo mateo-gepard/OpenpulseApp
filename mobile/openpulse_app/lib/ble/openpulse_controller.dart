@@ -13,6 +13,10 @@ class OpenPulseController extends ChangeNotifier {
   OpenPulseController(this.storage, {OpenPulseNotifications? notifications})
     : notifications = notifications ?? OpenPulseNotifications();
 
+  static const _connectTimeout = Duration(seconds: 16);
+  static const _reconnectDelay = Duration(seconds: 2);
+  static const _scanDuration = Duration(seconds: 10);
+
   final OpenPulseStorage storage;
   final OpenPulseNotifications notifications;
 
@@ -117,7 +121,7 @@ class OpenPulseController extends ChangeNotifier {
       }
       await FlutterBluePlus.setOptions(
         showPowerAlert: true,
-        restoreState: true,
+        restoreState: false,
       );
       adapterState = FlutterBluePlus.adapterStateNow;
       _adapterSubscription = FlutterBluePlus.adapterState.listen((state) {
@@ -176,21 +180,29 @@ class OpenPulseController extends ChangeNotifier {
 
     _intentionalDisconnect = false;
     _setPhase(ConnectionPhase.scanning, 'Scanning for OpenPulse advertising.');
+    try {
+      await FlutterBluePlus.stopScan();
+    } catch (_) {
+      // A stale platform scan should not block a fresh foreground scan.
+    }
     await _scanSubscription?.cancel();
     _scanSubscription = FlutterBluePlus.onScanResults.listen(
       _handleScanResults,
+      onError: (Object error) {
+        _setPhase(ConnectionPhase.error, 'BLE scan failed: $error');
+        _scheduleScanRetry();
+      },
     );
 
-    const scanDuration = Duration(seconds: 10);
     try {
-      await FlutterBluePlus.startScan(timeout: scanDuration);
+      await FlutterBluePlus.startScan(timeout: _scanDuration);
     } catch (error) {
       _setPhase(ConnectionPhase.error, 'BLE scan failed: $error');
       _scheduleScanRetry();
       return;
     }
     await Future<void>.delayed(
-      scanDuration + const Duration(milliseconds: 300),
+      _scanDuration + const Duration(milliseconds: 300),
     );
     if (phase == ConnectionPhase.scanning) {
       _setPhase(
@@ -379,7 +391,7 @@ class OpenPulseController extends ChangeNotifier {
   }
 
   void _handleScanResults(List<ScanResult> results) {
-    if (_connectInFlight) {
+    if (_connectInFlight || phase != ConnectionPhase.scanning) {
       return;
     }
     for (final result in results) {
@@ -410,31 +422,33 @@ class OpenPulseController extends ChangeNotifier {
     _connectInFlight = true;
     _device = device;
     _setPhase(ConnectionPhase.connecting, 'Connecting to OpenPulse.');
+    var retryNeeded = false;
     try {
       await _listenToDeviceConnection(device);
 
       await device.connect(
         license: License.nonprofit,
-        timeout: const Duration(seconds: 25),
+        timeout: _connectTimeout,
         mtu: null,
-        autoConnect: true,
       );
       await device.connectionState
           .where((state) => state == BluetoothConnectionState.connected)
           .first
           .timeout(
-            const Duration(seconds: 25),
-            onTimeout: () => throw TimeoutException(
-              'OpenPulse auto-connect did not complete.',
-            ),
+            _connectTimeout,
+            onTimeout: () =>
+                throw TimeoutException('OpenPulse did not connect in time.'),
           );
-      await _setupConnectedDevice(device);
+      retryNeeded = !await _setupConnectedDevice(device);
     } catch (error) {
       _clearGatt();
       _setPhase(ConnectionPhase.error, 'BLE connection failed: $error');
-      _scheduleScanRetry();
+      retryNeeded = true;
     } finally {
       _connectInFlight = false;
+      if (retryNeeded && !_intentionalDisconnect) {
+        _scheduleScanRetry();
+      }
     }
   }
 
@@ -489,27 +503,21 @@ class OpenPulseController extends ChangeNotifier {
       _intentionalDisconnect = false;
       _device = device;
       await _listenToDeviceConnection(device);
-      unawaited(
-        device
-            .connect(license: License.nonprofit, mtu: null, autoConnect: true)
-            .catchError((_) {}),
-      );
       if (await device.connectionState.first ==
           BluetoothConnectionState.connected) {
-        await _setupConnectedDevice(device, restored: true);
-        return true;
+        return _setupConnectedDevice(device, restored: true);
       }
     }
 
     return false;
   }
 
-  Future<void> _setupConnectedDevice(
+  Future<bool> _setupConnectedDevice(
     BluetoothDevice device, {
     bool restored = false,
   }) async {
     if (_gattSetupInFlight || _intentionalDisconnect) {
-      return;
+      return false;
     }
     _gattSetupInFlight = true;
     _device = device;
@@ -546,10 +554,17 @@ class OpenPulseController extends ChangeNotifier {
       await _timeSync();
 
       _setPhase(ConnectionPhase.streaming, 'OpenPulse is connected and live.');
+      return true;
     } catch (error) {
       _clearGatt();
-      _setPhase(ConnectionPhase.error, 'BLE restore failed: $error');
-      _scheduleScanRetry();
+      _setPhase(
+        ConnectionPhase.error,
+        restored ? 'BLE resume failed: $error' : 'BLE setup failed: $error',
+      );
+      if (!_connectInFlight) {
+        _scheduleScanRetry();
+      }
+      return false;
     } finally {
       _gattSetupInFlight = false;
     }
@@ -915,13 +930,36 @@ class OpenPulseController extends ChangeNotifier {
     _clearGatt(closeSession: false);
     _setPhase(ConnectionPhase.reconnecting, 'BLE link lost. Reconnecting.');
     if (device != null) {
-      unawaited(
-        device
-            .connect(license: License.nonprofit, mtu: null, autoConnect: true)
-            .catchError((_) {}),
-      );
+      unawaited(_reconnectKnownDevice(device));
     }
-    _scheduleScanRetry(const Duration(seconds: 20));
+    _scheduleScanRetry(_reconnectDelay);
+  }
+
+  Future<void> _reconnectKnownDevice(BluetoothDevice device) async {
+    if (_intentionalDisconnect || _connectInFlight || _gattSetupInFlight) {
+      return;
+    }
+    _connectInFlight = true;
+    _device = device;
+    var retryNeeded = false;
+    try {
+      await _listenToDeviceConnection(device);
+      await device.connect(
+        license: License.nonprofit,
+        timeout: _connectTimeout,
+        mtu: null,
+      );
+      retryNeeded = !await _setupConnectedDevice(device, restored: true);
+    } catch (_) {
+      retryNeeded = true;
+    } finally {
+      _connectInFlight = false;
+      if (retryNeeded &&
+          !_intentionalDisconnect &&
+          phase != ConnectionPhase.streaming) {
+        _scheduleScanRetry(Duration.zero);
+      }
+    }
   }
 
   void _scheduleScanRetry([Duration delay = const Duration(seconds: 3)]) {
