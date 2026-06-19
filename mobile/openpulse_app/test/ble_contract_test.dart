@@ -87,6 +87,32 @@ void main() {
     expect(frame.sensorLabel, 'OK');
     expect(frame.payloadLength, 6);
     expect(frame.payloadHex, '081234095678');
+    expect(frame.samples, [0x1234, 0x15678]);
+  });
+
+  test('plots only green samples from tagged raw PPG payloads', () {
+    final frame = OpenPulseBleContract.parseRawPpgFrame([
+      0x30,
+      0x05,
+      0x00,
+      0x01,
+      0x00,
+      0x01,
+      0x00,
+      0x09,
+      0x08,
+      0x11,
+      0x11,
+      0x10,
+      0x22,
+      0x22,
+      0x18,
+      0x33,
+      0x33,
+    ], DateTime.fromMillisecondsSinceEpoch(1000));
+
+    expect(frame, isNotNull);
+    expect(frame!.samples, [0x1111]);
   });
 
   test('parses extended live frames with IMU steps', () {

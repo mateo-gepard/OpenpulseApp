@@ -451,7 +451,7 @@ class LiveView extends StatelessWidget {
                         const SizedBox(height: 6),
                         Text(
                           rawEnabled
-                              ? 'Streaming single-channel green PPG at 128 Hz.'
+                              ? 'Streaming green PPG at 128 Hz; red/IR stay on for SpO2.'
                               : 'Tap Start only when you want to inspect the optical waveform.',
                           style: const TextStyle(color: _muted, height: 1.25),
                         ),

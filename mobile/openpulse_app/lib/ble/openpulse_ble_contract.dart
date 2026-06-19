@@ -183,12 +183,22 @@ class OpenPulseBleContract {
 
   static List<int> parseRawPpgSamples(List<int> payload) {
     final samples = <int>[];
+    final legacySamples = <int>[];
+    var sawTaggedSamples = false;
     for (var i = 0; i + 2 < payload.length; i += 3) {
-      samples.add(
-        ((payload[i] & 0x07) << 16) | (payload[i + 1] << 8) | payload[i + 2],
-      );
+      final tag = payload[i] >> 3;
+      final value =
+          ((payload[i] & 0x07) << 16) | (payload[i + 1] << 8) | payload[i + 2];
+      if (tag == 0) {
+        legacySamples.add(value);
+      } else {
+        sawTaggedSamples = true;
+        if (tag == 1) {
+          samples.add(value);
+        }
+      }
     }
-    return samples;
+    return sawTaggedSamples ? samples : legacySamples;
   }
 
   static ParsedLiveFrame? parseLiveFrame({

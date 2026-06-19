@@ -324,8 +324,15 @@ class OpenPulseController extends ChangeNotifier {
     notifyListeners();
 
     try {
+      final diagnosticGreenMa = ledGreenMa < 16 ? 16 : ledGreenMa;
+      final diagnosticRedMa = ledRedMa < 8 ? 8 : ledRedMa;
+      final diagnosticIrMa = ledIrMa < 8 ? 8 : ledIrMa;
       await writeSampling(128);
-      await writeLed(greenMa: 16, redMa: 0, irMa: 0);
+      await writeLed(
+        greenMa: diagnosticGreenMa,
+        redMa: diagnosticRedMa,
+        irMa: diagnosticIrMa,
+      );
       await Future<void>.delayed(const Duration(milliseconds: 180));
       await requestRawPpgWindow(seconds: 1);
       _rawPollTimer?.cancel();

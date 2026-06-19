@@ -641,7 +641,13 @@ class OpenPulseStorage {
 
       if (progress != null) {
         latestProgress = progress;
-        if (previousProgress != null && progress > previousProgress) {
+        final warmupCompleted =
+            previousProgress != null && previousProgress < 30 && progress >= 30;
+        final hourlyUpdate =
+            previousProgress != null &&
+            previousProgress >= 30 &&
+            progress > previousProgress;
+        if (warmupCompleted || hourlyUpdate) {
           marks.add(
             CalibrationUpdateMark(
               time: DateTime.fromMillisecondsSinceEpoch(timeMs),
