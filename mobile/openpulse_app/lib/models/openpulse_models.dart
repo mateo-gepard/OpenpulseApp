@@ -378,6 +378,7 @@ class BulkBackfillFrame {
     required this.sequence,
     required this.payloadLength,
     required this.payloadHex,
+    required this.payloadBytes,
   });
 
   final DateTime receivedAt;
@@ -385,6 +386,10 @@ class BulkBackfillFrame {
   final int sequence;
   final int payloadLength;
   final String payloadHex;
+  final List<int> payloadBytes;
+
+  bool get isLiveBackfill => recordKind == 5;
+  bool get isRestoreComplete => isLiveBackfill && payloadLength == 0;
 
   String get kindLabel {
     switch (recordKind) {
@@ -396,6 +401,8 @@ class BulkBackfillFrame {
         return 'Clean shutdown marker';
       case 4:
         return 'Gap marker';
+      case 5:
+        return payloadLength == 0 ? 'Restore complete' : 'Device live records';
       default:
         return 'Kind $recordKind';
     }

@@ -19,7 +19,7 @@
 
 LOG_MODULE_REGISTER(openpulse, LOG_LEVEL_INF);
 
-#define OPENPULSE_FW_VERSION "0.1.2-step-gate"
+#define OPENPULSE_FW_VERSION "0.1.3-motion-backfill"
 #define OPENPULSE_HW_VERSION "xiao_ble/nrf52840/sense"
 
 #define MAXM86161_I2C_ADDR 0x62
@@ -63,12 +63,17 @@ LOG_MODULE_REGISTER(openpulse, LOG_LEVEL_INF);
 #define OP_FRAME_BACKFILL 0x20
 #define OP_FRAME_RAW_PPG 0x30
 #define OP_RECORD_KIND_GAP_MARKER 4
+#define OP_RECORD_KIND_LIVE_BACKFILL 5
 #define OP_LIVE_RECORD_BASE_LEN 12
 #define OP_LIVE_RECORD_ACTIVITY_LEN 17
 #define OP_LIVE_RECORD_METRICS_LEN 20
+#define OP_BACKFILL_LIVE_RECORD_LEN 24
 #define OP_LIVE_RECORD_CALIBRATION_LEN 22
 #define OP_RAW_FRAME_HEADER_LEN 8
 #define OP_RAW_MAX_PAYLOAD_BYTES 180
+#define OP_HISTORY_RECORDS 900
+#define OP_BACKFILL_RECORDS_PER_FRAME 8
+#define OP_BACKFILL_NOTIFY_DELAY_MS 35
 #define OP_RAW_SETTLE_MS 120
 #define OP_PPG_BUFFER_LEN 4096
 #define OP_PPG_MIN_IBI_MS 333
@@ -110,6 +115,10 @@ LOG_MODULE_REGISTER(openpulse, LOG_LEVEL_INF);
 #define OP_STEP_PENDING_EXPIRE_MS 3500
 #define OP_STEP_MAX_DELTA_PER_SAMPLE 4
 #define OP_STEP_MAX_PENDING_STEPS 16
+#define OP_MOTION_ARTIFACT_ACCEL_DELTA_MG 140
+#define OP_MOTION_ARTIFACT_ACCEL_LOW_MG 720
+#define OP_MOTION_ARTIFACT_ACCEL_HIGH_MG 1280
+#define OP_MOTION_ARTIFACT_HOLD_MS 4000
 
 #define OP_QUALITY_SKIN_CONTACT BIT(0)
 #define OP_QUALITY_MOTION_ARTIFACT BIT(1)
@@ -184,6 +193,20 @@ struct optical_calibration_state {
 	int64_t last_hour_update_ms;
 };
 
+struct op_history_record {
+	uint64_t device_uptime_ms;
+	uint16_t hr_x10;
+	uint16_t ibi_ms;
+	int16_t accel_milli_g;
+	uint8_t spo2_percent;
+	uint8_t quality_flags;
+	uint32_t step_count;
+	uint8_t motion_status;
+	uint8_t hr_confidence;
+	uint8_t spo2_confidence;
+	uint8_t calibration_progress;
+};
+
 static struct bt_conn *current_conn;
 static bool control_notify_enabled;
 static bool live_notify_enabled;
@@ -242,6 +265,13 @@ static int64_t latest_hr_valid_ms;
 static int64_t latest_spo2_valid_ms;
 static uint32_t spo2_ratio_filtered_x1000;
 static int64_t last_live_notification_ms;
+static int64_t optical_motion_hold_until_ms;
+static struct op_history_record history_records[OP_HISTORY_RECORDS];
+static uint16_t history_head;
+static uint16_t history_count;
+static uint64_t backfill_from_uptime_ms;
+static uint16_t backfill_scan_index;
+static bool backfill_active;
 static uint8_t last_puck_status[4] = {
 	OP_EVENT_REMOVED,
 	OP_PUCK_KIND_PPG,
@@ -256,11 +286,13 @@ static void sensor_work_handler(struct k_work *work);
 static void motion_work_handler(struct k_work *work);
 static void raw_window_work_handler(struct k_work *work);
 static void advertising_work_handler(struct k_work *work);
+static void backfill_work_handler(struct k_work *work);
 static K_WORK_DELAYABLE_DEFINE(stream_work, stream_work_handler);
 static K_WORK_DELAYABLE_DEFINE(sensor_work, sensor_work_handler);
 static K_WORK_DELAYABLE_DEFINE(motion_work, motion_work_handler);
 static K_WORK_DELAYABLE_DEFINE(raw_window_work, raw_window_work_handler);
 static K_WORK_DELAYABLE_DEFINE(advertising_work, advertising_work_handler);
+static K_WORK_DELAYABLE_DEFINE(backfill_work, backfill_work_handler);
 
 static struct bt_uuid_16 dis_service_uuid = BT_UUID_INIT_16(0x180a);
 static struct bt_uuid_16 dis_manufacturer_uuid = BT_UUID_INIT_16(0x2a29);
@@ -399,19 +431,73 @@ static void notify_control_ack(uint8_t command, uint8_t status)
 	}
 }
 
-static void send_gap_marker(uint64_t from_uptime_ms)
+static const struct op_history_record *history_record_at(uint16_t chronological_index)
 {
-	uint8_t frame[14];
+	uint16_t idx;
+
+	if (chronological_index >= history_count) {
+		return NULL;
+	}
+
+	idx = (history_head + OP_HISTORY_RECORDS - history_count +
+	       chronological_index) % OP_HISTORY_RECORDS;
+	return &history_records[idx];
+}
+
+static void history_push_record(const struct op_history_record *record)
+{
+	history_records[history_head] = *record;
+	history_head = (history_head + 1U) % OP_HISTORY_RECORDS;
+	if (history_count < OP_HISTORY_RECORDS) {
+		history_count++;
+	}
+}
+
+static void pack_backfill_live_record(uint8_t *dst,
+				      const struct op_history_record *record)
+{
+	sys_put_le64(record->device_uptime_ms, &dst[0]);
+	sys_put_le16(record->hr_x10, &dst[8]);
+	sys_put_le16(record->ibi_ms, &dst[10]);
+	sys_put_le16((uint16_t)record->accel_milli_g, &dst[12]);
+	dst[14] = record->spo2_percent;
+	dst[15] = record->quality_flags;
+	sys_put_le32(record->step_count, &dst[16]);
+	dst[20] = record->motion_status;
+	dst[21] = record->hr_confidence;
+	dst[22] = record->spo2_confidence;
+	dst[23] = record->calibration_progress;
+}
+
+static void send_live_backfill_frame(const uint8_t *payload,
+				     uint16_t payload_len)
+{
+	uint8_t frame[6 + OP_BACKFILL_RECORDS_PER_FRAME * OP_BACKFILL_LIVE_RECORD_LEN];
+
+	if (payload_len > sizeof(frame) - 6U) {
+		payload_len = sizeof(frame) - 6U;
+	}
 
 	frame[0] = OP_FRAME_BACKFILL;
-	frame[1] = OP_RECORD_KIND_GAP_MARKER;
+	frame[1] = OP_RECORD_KIND_LIVE_BACKFILL;
 	sys_put_le16(bulk_sequence++, &frame[2]);
-	sys_put_le16(sizeof(uint64_t), &frame[4]);
-	sys_put_le64(from_uptime_ms, &frame[6]);
+	sys_put_le16(payload_len, &frame[4]);
+	if (payload_len > 0 && payload != NULL) {
+		memcpy(&frame[6], payload, payload_len);
+	}
 
 	if (bulk_notify_enabled && current_conn) {
-		(void)bt_gatt_notify(current_conn, &openpulse_svc.attrs[8], frame, sizeof(frame));
+		(void)bt_gatt_notify(current_conn, &openpulse_svc.attrs[8],
+				     frame, 6U + payload_len);
 	}
+}
+
+static void start_device_backfill(uint64_t from_uptime_ms)
+{
+	backfill_from_uptime_ms = from_uptime_ms;
+	backfill_scan_index = 0;
+	backfill_active = true;
+	k_work_reschedule(&backfill_work, K_NO_WAIT);
 }
 
 static void send_raw_frame(uint16_t seconds,
@@ -484,6 +570,15 @@ static ssize_t write_control(struct bt_conn *conn,
 			return BT_GATT_ERR(BT_ATT_ERR_VALUE_NOT_ALLOWED);
 		}
 		current_mode = (enum op_mode)payload[0];
+		if (current_mode == OP_MODE_ACTIVE ||
+		    current_mode == OP_MODE_LOW_POWER ||
+		    current_mode == OP_MODE_HR_ONLY) {
+			last_live_notification_ms = 0;
+			k_work_reschedule(&stream_work, K_NO_WAIT);
+		} else {
+			k_work_cancel_delayable(&stream_work);
+			stop_maxm86161();
+		}
 		notify_control_ack(command, 0);
 		break;
 	case 0x03:
@@ -508,7 +603,7 @@ static ssize_t write_control(struct bt_conn *conn,
 		if (payload_len != 8) {
 			return BT_GATT_ERR(BT_ATT_ERR_INVALID_ATTRIBUTE_LEN);
 		}
-		send_gap_marker(sys_get_le64(payload));
+		start_device_backfill(sys_get_le64(payload));
 		notify_control_ack(command, 0);
 		break;
 	case 0x06:
@@ -536,6 +631,10 @@ static ssize_t write_control(struct bt_conn *conn,
 			return BT_GATT_ERR(BT_ATT_ERR_INVALID_ATTRIBUTE_LEN);
 		}
 		current_mode = OP_MODE_SHIP;
+		backfill_active = false;
+		k_work_cancel_delayable(&backfill_work);
+		k_work_cancel_delayable(&stream_work);
+		stop_maxm86161();
 		notify_control_ack(command, 0);
 		break;
 	default:
@@ -569,9 +668,6 @@ static void live_ccc_changed(const struct bt_gatt_attr *attr, uint16_t value)
 	if (live_notify_enabled && time_synced) {
 		last_live_notification_ms = 0;
 		k_work_reschedule(&stream_work, K_NO_WAIT);
-	} else if (!live_notify_enabled) {
-		k_work_cancel_delayable(&stream_work);
-		stop_maxm86161();
 	}
 }
 
@@ -1130,6 +1226,57 @@ static void hold_spo2_value(uint8_t *quality)
 
 	latest_spo2_percent = 0xff;
 	latest_spo2_confidence = 0;
+}
+
+static bool current_motion_artifact(void)
+{
+	int64_t now_ms = k_uptime_get();
+
+	if (motion_status == OP_MOTION_STATUS_OK &&
+	    (latest_accel_delta_mg >= OP_MOTION_ARTIFACT_ACCEL_DELTA_MG ||
+	     latest_accel_milli_g < OP_MOTION_ARTIFACT_ACCEL_LOW_MG ||
+	     latest_accel_milli_g > OP_MOTION_ARTIFACT_ACCEL_HIGH_MG)) {
+		optical_motion_hold_until_ms = now_ms + OP_MOTION_ARTIFACT_HOLD_MS;
+	}
+
+	return optical_motion_hold_until_ms > now_ms;
+}
+
+static bool ppg_stats_show_optical_jump(const struct ppg_window_stats *stats)
+{
+	uint32_t green_dc = stats_mean(stats->green_sum, stats->green_count);
+	uint32_t red_dc = stats_mean(stats->red_sum, stats->red_count);
+	uint32_t ir_dc = stats_mean(stats->ir_sum, stats->ir_count);
+	uint32_t green_ac = stats_range(stats->green_min, stats->green_max);
+	uint32_t red_ac = stats_range(stats->red_min, stats->red_max);
+	uint32_t ir_ac = stats_range(stats->ir_min, stats->ir_max);
+	uint32_t learned_green_limit = optical_cal.green_ac_ema > 0 ?
+				       max_u32(2500U, optical_cal.green_ac_ema * 6U) :
+				       0U;
+	uint32_t learned_red_limit = optical_cal.red_ac_ema > 0 ?
+				     max_u32(1800U, optical_cal.red_ac_ema * 6U) :
+				     0U;
+	uint32_t learned_ir_limit = optical_cal.ir_ac_ema > 0 ?
+				    max_u32(1800U, optical_cal.ir_ac_ema * 6U) :
+				    0U;
+
+	if (stats->green_count >= 4U && green_dc > 0 &&
+	    ((learned_green_limit > 0 && green_ac > learned_green_limit) ||
+	     green_ac > green_dc / 4U)) {
+		return true;
+	}
+	if (stats->red_count >= 4U && red_dc > 0 &&
+	    ((learned_red_limit > 0 && red_ac > learned_red_limit) ||
+	     red_ac > red_dc / 3U)) {
+		return true;
+	}
+	if (stats->ir_count >= 4U && ir_dc > 0 &&
+	    ((learned_ir_limit > 0 && ir_ac > learned_ir_limit) ||
+	     ir_ac > ir_dc / 3U)) {
+		return true;
+	}
+
+	return false;
 }
 
 static void ppg_ring_reset(struct ppg_ring *ring)
@@ -1784,14 +1931,41 @@ static void update_optical_metrics(uint8_t *quality)
 		switch (tag) {
 		case 1:
 			ppg_stats_add_green(&stats, sample);
-			ppg_ring_push(&ppg_green_ring, sample);
 			break;
 		case 2:
 			ppg_stats_add_ir(&stats, sample);
-			ppg_ring_push(&ppg_ir_ring, sample);
 			break;
 		case 3:
 			ppg_stats_add_red(&stats, sample);
+			break;
+		default:
+			break;
+		}
+	}
+
+	if (current_motion_artifact() || ppg_stats_show_optical_jump(&stats)) {
+		*quality |= OP_QUALITY_MOTION_ARTIFACT | OP_QUALITY_PPG_UNCALIBRATED;
+		optical_cal.rejected_windows++;
+		hold_hr_value(quality);
+		hold_spo2_value(quality);
+		latest_metric_calibration = optical_calibration_progress();
+		return;
+	}
+
+	for (uint8_t i = 0; i + 2U < payload_len; i += MAXM86161_FIFO_ITEM_BYTES) {
+		uint8_t tag = payload[i] >> 3;
+		uint32_t sample = ((uint32_t)(payload[i] & 0x07U) << 16) |
+				  ((uint32_t)payload[i + 1U] << 8) |
+				  payload[i + 2U];
+
+		switch (tag) {
+		case 1:
+			ppg_ring_push(&ppg_green_ring, sample);
+			break;
+		case 2:
+			ppg_ring_push(&ppg_ir_ring, sample);
+			break;
+		case 3:
 			ppg_ring_push(&ppg_red_ring, sample);
 			break;
 		default:
@@ -2318,13 +2492,62 @@ static void advertising_work_handler(struct k_work *work)
 	k_work_reschedule(&advertising_work, K_SECONDS(3));
 }
 
+static void backfill_work_handler(struct k_work *work)
+{
+	uint8_t payload[OP_BACKFILL_RECORDS_PER_FRAME * OP_BACKFILL_LIVE_RECORD_LEN];
+	uint8_t record_count = 0;
+
+	ARG_UNUSED(work);
+
+	if (!backfill_active || !bulk_notify_enabled || !current_conn) {
+		backfill_active = false;
+		return;
+	}
+
+	while (backfill_scan_index < history_count &&
+	       record_count < OP_BACKFILL_RECORDS_PER_FRAME) {
+		const struct op_history_record *record =
+			history_record_at(backfill_scan_index++);
+		if (record == NULL ||
+		    record->device_uptime_ms <= backfill_from_uptime_ms) {
+			continue;
+		}
+
+		pack_backfill_live_record(
+			&payload[record_count * OP_BACKFILL_LIVE_RECORD_LEN],
+			record);
+		record_count++;
+	}
+
+	if (record_count > 0) {
+		send_live_backfill_frame(payload,
+					 record_count * OP_BACKFILL_LIVE_RECORD_LEN);
+		k_work_reschedule(&backfill_work,
+				  K_MSEC(OP_BACKFILL_NOTIFY_DELAY_MS));
+		return;
+	}
+
+	if (backfill_scan_index < history_count) {
+		k_work_reschedule(&backfill_work,
+				  K_MSEC(OP_BACKFILL_NOTIFY_DELAY_MS));
+		return;
+	}
+
+	send_live_backfill_frame(NULL, 0);
+	backfill_active = false;
+}
+
 static void stream_work_handler(struct k_work *work)
 {
 	uint8_t frame[4 + OP_LIVE_RECORD_METRICS_LEN];
+	struct op_history_record record;
 	uint8_t quality = 0;
 	int64_t now_ms;
+	uint32_t delta_ms = OP_LIVE_NOTIFY_MS;
+	bool can_notify;
 
-	if (!current_conn || !live_notify_enabled || !time_synced || current_mode == OP_MODE_SHIP) {
+	if (current_mode == OP_MODE_STANDBY || current_mode == OP_MODE_SHIP) {
+		stop_maxm86161();
 		return;
 	}
 
@@ -2337,6 +2560,10 @@ static void stream_work_handler(struct k_work *work)
 		k_work_reschedule(&stream_work, K_MSEC(OP_PPG_POLL_MS));
 		return;
 	}
+	if (last_live_notification_ms > 0) {
+		uint64_t elapsed = (uint64_t)(now_ms - last_live_notification_ms);
+		delta_ms = elapsed > UINT32_MAX ? UINT32_MAX : (uint32_t)elapsed;
+	}
 
 	if (last_puck_status[2]) {
 		quality |= OP_QUALITY_SKIN_CONTACT;
@@ -2348,10 +2575,24 @@ static void stream_work_handler(struct k_work *work)
 		quality |= OP_QUALITY_BATTERY_LOW;
 	}
 
+	record.device_uptime_ms = (uint64_t)now_ms;
+	record.hr_x10 = latest_hr_x10;
+	record.ibi_ms = latest_ibi_ms;
+	record.accel_milli_g = latest_accel_milli_g;
+	record.spo2_percent = latest_spo2_percent;
+	record.quality_flags = quality;
+	record.step_count = step_count;
+	record.motion_status = motion_status;
+	record.hr_confidence = latest_hr_confidence;
+	record.spo2_confidence = latest_spo2_confidence;
+	record.calibration_progress = latest_metric_calibration;
+	history_push_record(&record);
+
+	can_notify = current_conn && live_notify_enabled && time_synced;
 	frame[0] = OP_FRAME_LIVE;
 	frame[1] = 1;
 	sys_put_le16(live_sequence++, &frame[2]);
-	sys_put_le32(1000, &frame[4]);
+	sys_put_le32(delta_ms, &frame[4]);
 	sys_put_le16(latest_hr_x10, &frame[8]);
 	sys_put_le16(latest_ibi_ms, &frame[10]);
 	sys_put_le16((uint16_t)latest_accel_milli_g, &frame[12]);
@@ -2363,7 +2604,10 @@ static void stream_work_handler(struct k_work *work)
 	frame[22] = latest_spo2_confidence;
 	frame[23] = latest_metric_calibration;
 
-	(void)bt_gatt_notify(current_conn, &openpulse_svc.attrs[5], frame, sizeof(frame));
+	if (can_notify) {
+		(void)bt_gatt_notify(current_conn, &openpulse_svc.attrs[5],
+				     frame, sizeof(frame));
+	}
 
 	last_live_notification_ms = now_ms;
 	k_work_reschedule(&stream_work, K_MSEC(OP_PPG_POLL_MS));
@@ -2392,7 +2636,6 @@ static void disconnected(struct bt_conn *conn, uint8_t reason)
 
 	LOG_INF("BLE disconnected: 0x%02x", reason);
 
-	k_work_cancel_delayable(&stream_work);
 	k_work_cancel_delayable(&raw_window_work);
 	control_notify_enabled = false;
 	live_notify_enabled = false;
@@ -2402,7 +2645,10 @@ static void disconnected(struct bt_conn *conn, uint8_t reason)
 	battery_notify_enabled = false;
 	time_synced = false;
 	last_app_activity_ms = 0;
-	stop_maxm86161();
+	if (current_mode == OP_MODE_STANDBY || current_mode == OP_MODE_SHIP) {
+		k_work_cancel_delayable(&stream_work);
+		stop_maxm86161();
+	}
 
 	if (current_conn) {
 		bt_conn_unref(current_conn);

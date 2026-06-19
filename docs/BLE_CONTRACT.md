@@ -132,6 +132,28 @@ Record kinds:
 | `2` | IBI night window |
 | `3` | clean shutdown marker |
 | `4` | gap marker |
+| `5` | live record backfill |
+
+### Live Record Backfill Payload
+
+Record kind `5` carries repeated 24-byte records captured from the device's
+local RAM history. A kind `5` frame with `payload length = 0` marks restore
+complete. The app should treat these records as the device source of truth and
+replace overlapping phone-local live rows.
+
+| Offset | Type | Field |
+|---:|---|---|
+| 0 | `uint64` | absolute `device_uptime_ms` |
+| 8 | `uint16` | heart rate x10 bpm, `0` if unavailable |
+| 10 | `uint16` | IBI ms, `0` if unavailable |
+| 12 | `int16` | accel magnitude milli-g |
+| 14 | `uint8` | SpO2 percent, `0xFF` if unavailable |
+| 15 | `uint8` | quality flags |
+| 16 | `uint32` | step count |
+| 20 | `uint8` | motion status |
+| 21 | `uint8` | HR confidence 0-100 |
+| 22 | `uint8` | SpO2 confidence 0-100 |
+| 23 | `uint8` | optical calibration progress 0-100 |
 
 ## Raw PPG Frame
 

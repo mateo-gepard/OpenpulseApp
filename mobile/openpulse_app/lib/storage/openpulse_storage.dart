@@ -278,7 +278,11 @@ class OpenPulseStorage {
   }
 
   void insertLiveRecord(int? sessionId, LiveRecord record) {
-    _requireDb().execute(
+    _insertLiveRecord(_requireDb(), sessionId, record);
+  }
+
+  void _insertLiveRecord(Database db, int? sessionId, LiveRecord record) {
+    db.execute(
       '''
       INSERT INTO live_records (
         session_id,
@@ -318,6 +322,38 @@ class OpenPulseStorage {
         record.calibrationProgress,
       ],
     );
+  }
+
+  int replaceLiveRecordsFromDeviceBackfill(
+    int? sessionId,
+    List<LiveRecord> records,
+  ) {
+    if (records.isEmpty) {
+      return 0;
+    }
+
+    final db = _requireDb();
+    final wallTimes = records.map(
+      (record) => record.wallTime.millisecondsSinceEpoch,
+    );
+    final startMs = wallTimes.reduce(math.min);
+    final endMs = wallTimes.reduce(math.max);
+
+    db.execute('BEGIN IMMEDIATE;');
+    try {
+      db.execute(
+        'DELETE FROM live_records WHERE wall_time_ms >= ? AND wall_time_ms <= ?',
+        [startMs, endMs],
+      );
+      for (final record in records) {
+        _insertLiveRecord(db, sessionId, record);
+      }
+      db.execute('COMMIT;');
+      return records.length;
+    } catch (_) {
+      db.execute('ROLLBACK;');
+      rethrow;
+    }
   }
 
   void insertControlWrite({

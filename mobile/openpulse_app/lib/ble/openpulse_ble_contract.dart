@@ -9,6 +9,7 @@ class OpenPulseBleContract {
   static const legacyLiveRecordLength = 12;
   static const activityLiveRecordLength = 17;
   static const metricsLiveRecordLength = 20;
+  static const backfillLiveRecordLength = 24;
 
   static final serviceUuid = Guid('f04d0000-57f5-4f5a-9b80-4f6f2f1d0001');
   static final controlUuid = Guid('f04d0001-57f5-4f5a-9b80-4f6f2f1d0001');
@@ -143,7 +144,62 @@ class OpenPulseBleContract {
       sequence: data.getUint16(2, Endian.little),
       payloadLength: payloadLength,
       payloadHex: bytesToHex(payload),
+      payloadBytes: payload,
     );
+  }
+
+  static List<LiveRecord> parseBackfillLiveRecords({
+    required BulkBackfillFrame frame,
+    required int syncedUnixMs,
+    required int syncedDeviceUptimeMs,
+  }) {
+    if (!frame.isLiveBackfill ||
+        frame.payloadLength < backfillLiveRecordLength ||
+        frame.payloadBytes.length < backfillLiveRecordLength) {
+      return const [];
+    }
+
+    final payload = Uint8List.fromList(frame.payloadBytes);
+    final data = ByteData.sublistView(payload);
+    final records = <LiveRecord>[];
+    for (
+      var offset = 0;
+      offset + backfillLiveRecordLength <= frame.payloadBytes.length;
+      offset += backfillLiveRecordLength
+    ) {
+      final deviceUptime = data.getUint64(offset, Endian.little);
+      final hrX10 = data.getUint16(offset + 8, Endian.little);
+      final ibiMs = data.getUint16(offset + 10, Endian.little);
+      final accel = data.getInt16(offset + 12, Endian.little);
+      final spo2 = data.getUint8(offset + 14);
+      final quality = data.getUint8(offset + 15);
+      final stepCount = data.getUint32(offset + 16, Endian.little);
+      final motionStatus = data.getUint8(offset + 20);
+      final hrConfidence = data.getUint8(offset + 21);
+      final spo2Confidence = data.getUint8(offset + 22);
+      final calibrationProgress = data.getUint8(offset + 23);
+      final wallTimeMs = syncedUnixMs + (deviceUptime - syncedDeviceUptimeMs);
+
+      records.add(
+        LiveRecord(
+          receivedAt: frame.receivedAt,
+          wallTime: DateTime.fromMillisecondsSinceEpoch(wallTimeMs),
+          deviceUptimeMs: deviceUptime,
+          sequence: frame.sequence,
+          heartRateBpm: hrX10 == 0 ? null : hrX10 / 10.0,
+          ibiMs: ibiMs == 0 ? null : ibiMs,
+          accelMilliG: accel == 0 ? null : accel,
+          spo2Percent: spo2 == 0xff ? null : spo2,
+          qualityFlags: quality,
+          stepCount: stepCount,
+          motionStatus: motionStatus,
+          hrConfidence: hrConfidence,
+          spo2Confidence: spo2Confidence,
+          calibrationProgress: calibrationProgress,
+        ),
+      );
+    }
+    return records;
   }
 
   static RawPpgFrame? parseRawPpgFrame(List<int> bytes, DateTime receivedAt) {

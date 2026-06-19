@@ -58,6 +58,9 @@ class OpenPulseController extends ChangeNotifier {
   bool bulkBackfillReady = false;
   bool rawPpgReady = false;
   bool stepGoalNotified = false;
+  bool deviceRestoreInProgress = false;
+  int deviceRestoreRecordCount = 0;
+  DateTime? lastDeviceRestoreAt;
 
   BluetoothDevice? _device;
   BluetoothCharacteristic? _control;
@@ -296,10 +299,25 @@ class OpenPulseController extends ChangeNotifier {
     notifyListeners();
   }
 
-  Future<void> requestBackfill() async {
+  Future<void> requestBackfill({bool fullDeviceRestore = false}) async {
+    if (fullDeviceRestore) {
+      deviceRestoreInProgress = true;
+      deviceRestoreRecordCount = 0;
+      statusMessage = 'Restoring phone cache from OpenPulse.';
+      notifyListeners();
+    }
     await _writeControl(
-      OpenPulseBleContract.buildRequestBackfill(_lastDeviceUptimeMs),
+      OpenPulseBleContract.buildRequestBackfill(
+        fullDeviceRestore ? 0 : _lastDeviceUptimeMs,
+      ),
     );
+  }
+
+  Future<void> restoreDeviceLocalData() async {
+    if (!bulkBackfillReady) {
+      return;
+    }
+    await requestBackfill(fullDeviceRestore: true);
   }
 
   Future<void> requestRawPpgWindow({int seconds = 1}) async {
@@ -559,6 +577,7 @@ class OpenPulseController extends ChangeNotifier {
       await _readInitialPuckStatus();
       await _subscribeToNotifications();
       await _timeSync();
+      await restoreDeviceLocalData();
 
       _setPhase(ConnectionPhase.streaming, 'OpenPulse is connected and live.');
       return true;
@@ -893,6 +912,50 @@ class OpenPulseController extends ChangeNotifier {
     }
     latestBackfillFrame = frame;
     storage.insertBackfillFrame(_sessionId, frame);
+    if (frame.isLiveBackfill) {
+      if (frame.isRestoreComplete) {
+        final wasRestoring = deviceRestoreInProgress;
+        deviceRestoreInProgress = false;
+        lastDeviceRestoreAt = frame.receivedAt;
+        statusMessage = wasRestoring
+            ? deviceRestoreRecordCount == 0
+                  ? 'OpenPulse had no newer device-local records.'
+                  : 'OpenPulse restored $deviceRestoreRecordCount device records.'
+            : 'OpenPulse backfill complete.';
+        notifyListeners();
+        return;
+      }
+
+      final records = OpenPulseBleContract.parseBackfillLiveRecords(
+        frame: frame,
+        syncedUnixMs: _syncedUnixMs,
+        syncedDeviceUptimeMs: _syncedDeviceUptimeMs,
+      );
+      if (records.isNotEmpty) {
+        final replaced = storage.replaceLiveRecordsFromDeviceBackfill(
+          _sessionId,
+          records,
+        );
+        if (deviceRestoreInProgress) {
+          deviceRestoreRecordCount += replaced;
+        }
+        _lastDeviceUptimeMs = records.last.deviceUptimeMs > _lastDeviceUptimeMs
+            ? records.last.deviceUptimeMs
+            : _lastDeviceUptimeMs;
+        latestLiveRecord = records.last;
+        recentLiveRecords = [...recentLiveRecords, ...records]
+          ..sort((a, b) => a.wallTime.compareTo(b.wallTime));
+        recentLiveRecords = recentLiveRecords
+            .takeLast(90)
+            .toList(growable: false);
+        _refreshSelectedDay();
+        _refreshHrvSummary();
+        _refreshCalibrationTimeline();
+        statusMessage = deviceRestoreInProgress
+            ? 'Restoring OpenPulse device records: $deviceRestoreRecordCount.'
+            : 'Backfilled $replaced OpenPulse device records.';
+      }
+    }
     notifyListeners();
   }
 
@@ -1015,6 +1078,7 @@ class OpenPulseController extends ChangeNotifier {
     recentLiveRecords = const [];
     recentRawPpgSamples = const [];
     stepGoalNotified = false;
+    deviceRestoreInProgress = false;
     latestLiveRecord = null;
     latestRawPpgFrame = null;
     for (final subscription in _valueSubscriptions) {

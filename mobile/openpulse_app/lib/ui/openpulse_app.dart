@@ -659,9 +659,20 @@ class HistoryView extends StatelessWidget {
                 label: 'Current link',
                 trailing: controller.phase.label,
               ),
+              const SizedBox(height: 12),
+              _ProgressLine(
+                value: controller.deviceRestoreInProgress ? 0.5 : 1,
+                color: _amber,
+                label: 'Device restore',
+                trailing: controller.deviceRestoreInProgress
+                    ? '${controller.deviceRestoreRecordCount} records'
+                    : controller.lastDeviceRestoreAt == null
+                    ? 'waiting'
+                    : '${controller.deviceRestoreRecordCount} restored',
+              ),
               const SizedBox(height: 16),
               Text(
-                'After a connection gap, the app stores new live records and requests backfill. Backfill is still a gap marker until firmware history storage is added.',
+                'On connect, OpenPulse sends its device-local RAM history and the phone replaces overlapping local rows with those device records. Board reboots still clear prototype history.',
                 style: const TextStyle(color: _muted, height: 1.35),
               ),
             ],
