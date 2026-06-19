@@ -19,7 +19,7 @@
 
 LOG_MODULE_REGISTER(openpulse, LOG_LEVEL_INF);
 
-#define OPENPULSE_FW_VERSION "0.1.1-hr-window"
+#define OPENPULSE_FW_VERSION "0.1.2-step-gate"
 #define OPENPULSE_HW_VERSION "xiao_ble/nrf52840/sense"
 
 #define MAXM86161_I2C_ADDR 0x62
@@ -98,6 +98,18 @@ LOG_MODULE_REGISTER(openpulse, LOG_LEVEL_INF);
 #define OP_MOTION_STATUS_OK 0
 #define OP_MOTION_STATUS_UNAVAILABLE 1
 #define OP_MOTION_STATUS_PEDOMETER_UNAVAILABLE 2
+
+#define OP_STEP_GRAVITY_MG 1000
+#define OP_STEP_MIN_ACCEL_MAG_MG 760
+#define OP_STEP_MAX_ACCEL_MAG_MG 1550
+#define OP_STEP_MIN_ACCEL_DELTA_MG 55
+#define OP_STEP_MIN_ACCEL_DEVIATION_MG 45
+#define OP_STEP_MIN_INTERVAL_MS 320
+#define OP_STEP_MAX_INTERVAL_MS 2200
+#define OP_STEP_CONFIRMATION_COUNT 3
+#define OP_STEP_PENDING_EXPIRE_MS 3500
+#define OP_STEP_MAX_DELTA_PER_SAMPLE 4
+#define OP_STEP_MAX_PENDING_STEPS 16
 
 #define OP_QUALITY_SKIN_CONTACT BIT(0)
 #define OP_QUALITY_MOTION_ARTIFACT BIT(1)
@@ -201,11 +213,16 @@ static uint16_t pending_raw_seconds;
 static uint8_t pending_raw_sensor_status = OP_SENSOR_STATUS_UNAVAILABLE;
 static bool imu_ready;
 static int16_t latest_accel_milli_g;
+static int16_t latest_accel_delta_mg;
 static uint32_t step_count;
 static uint8_t motion_status = OP_MOTION_STATUS_UNAVAILABLE;
 static bool lsm6dsl_pedometer_ready;
 static bool lsm6dsl_step_baseline_ready;
 static uint16_t lsm6dsl_last_step_counter;
+static uint16_t lsm6dsl_pending_steps;
+static uint8_t lsm6dsl_step_confirmations;
+static int64_t lsm6dsl_last_hw_step_ms;
+static int64_t lsm6dsl_last_pending_step_ms;
 
 static uint8_t battery_level = 0xff;
 static bool battery_level_known;
@@ -1946,6 +1963,10 @@ static int configure_lsm6dsl_pedometer(void)
 	step_count = 0;
 	lsm6dsl_step_baseline_ready = false;
 	lsm6dsl_last_step_counter = 0;
+	lsm6dsl_pending_steps = 0;
+	lsm6dsl_step_confirmations = 0;
+	lsm6dsl_last_hw_step_ms = 0;
+	lsm6dsl_last_pending_step_ms = 0;
 	lsm6dsl_pedometer_ready = true;
 
 	return 0;
@@ -1977,25 +1998,101 @@ static int read_lsm6dsl_step_counter(uint16_t *counter)
 #endif
 }
 
+static void reset_lsm6dsl_step_sequence(void)
+{
+	lsm6dsl_pending_steps = 0;
+	lsm6dsl_step_confirmations = 0;
+	lsm6dsl_last_pending_step_ms = 0;
+}
+
+static void reset_lsm6dsl_step_gate(void)
+{
+	reset_lsm6dsl_step_sequence();
+	lsm6dsl_last_hw_step_ms = 0;
+}
+
+static bool current_motion_supports_step(void)
+{
+	uint32_t gravity_delta;
+
+	if (latest_accel_milli_g < OP_STEP_MIN_ACCEL_MAG_MG ||
+	    latest_accel_milli_g > OP_STEP_MAX_ACCEL_MAG_MG) {
+		return false;
+	}
+
+	gravity_delta = abs_i32((int32_t)latest_accel_milli_g - OP_STEP_GRAVITY_MG);
+	return latest_accel_delta_mg >= OP_STEP_MIN_ACCEL_DELTA_MG ||
+	       gravity_delta >= OP_STEP_MIN_ACCEL_DEVIATION_MG;
+}
+
 static void update_steps_from_lsm6dsl(void)
 {
 	uint16_t hardware_steps;
+	uint16_t hardware_delta;
+	int64_t now_ms;
+	int64_t interval_ms = 0;
+	bool starts_new_sequence;
 
 	if (!lsm6dsl_pedometer_ready || read_lsm6dsl_step_counter(&hardware_steps)) {
 		motion_status = OP_MOTION_STATUS_PEDOMETER_UNAVAILABLE;
+		reset_lsm6dsl_step_gate();
 		return;
 	}
 
 	if (!lsm6dsl_step_baseline_ready) {
 		lsm6dsl_last_step_counter = hardware_steps;
 		lsm6dsl_step_baseline_ready = true;
+		reset_lsm6dsl_step_gate();
 		motion_status = OP_MOTION_STATUS_OK;
 		return;
 	}
 
-	step_count += (uint16_t)(hardware_steps - lsm6dsl_last_step_counter);
+	now_ms = k_uptime_get();
+	hardware_delta = (uint16_t)(hardware_steps - lsm6dsl_last_step_counter);
 	lsm6dsl_last_step_counter = hardware_steps;
 	motion_status = OP_MOTION_STATUS_OK;
+
+	if (hardware_delta == 0) {
+		if (lsm6dsl_last_pending_step_ms > 0 &&
+		    now_ms - lsm6dsl_last_pending_step_ms > OP_STEP_PENDING_EXPIRE_MS) {
+			reset_lsm6dsl_step_sequence();
+		}
+		return;
+	}
+
+	if (hardware_delta > OP_STEP_MAX_DELTA_PER_SAMPLE || !current_motion_supports_step()) {
+		reset_lsm6dsl_step_gate();
+		return;
+	}
+
+	if (lsm6dsl_last_hw_step_ms > 0) {
+		interval_ms = now_ms - lsm6dsl_last_hw_step_ms;
+		if (interval_ms < OP_STEP_MIN_INTERVAL_MS) {
+			reset_lsm6dsl_step_gate();
+			return;
+		}
+	}
+
+	starts_new_sequence = lsm6dsl_last_hw_step_ms == 0 ||
+			      interval_ms > OP_STEP_MAX_INTERVAL_MS;
+	if (starts_new_sequence) {
+		reset_lsm6dsl_step_sequence();
+	}
+
+	lsm6dsl_last_hw_step_ms = now_ms;
+	lsm6dsl_last_pending_step_ms = now_ms;
+	lsm6dsl_pending_steps += hardware_delta;
+	lsm6dsl_step_confirmations += (uint8_t)hardware_delta;
+
+	if (lsm6dsl_pending_steps > OP_STEP_MAX_PENDING_STEPS) {
+		reset_lsm6dsl_step_gate();
+		return;
+	}
+
+	if (lsm6dsl_step_confirmations >= OP_STEP_CONFIRMATION_COUNT) {
+		step_count += lsm6dsl_pending_steps;
+		reset_lsm6dsl_step_sequence();
+	}
 }
 
 static void configure_motion_sensor(void)
@@ -2046,10 +2143,12 @@ static void sample_motion(void)
 	int64_t z;
 	uint64_t magnitude_sq;
 	uint32_t magnitude_mg;
+	int16_t previous_magnitude_mg = latest_accel_milli_g;
 
 	if (!imu_ready) {
 		motion_status = OP_MOTION_STATUS_UNAVAILABLE;
 		latest_accel_milli_g = 0;
+		latest_accel_delta_mg = 0;
 		return;
 	}
 
@@ -2059,6 +2158,7 @@ static void sample_motion(void)
 	    sensor_channel_get(imu_dev, SENSOR_CHAN_ACCEL_Z, &accel[2])) {
 		motion_status = OP_MOTION_STATUS_UNAVAILABLE;
 		latest_accel_milli_g = 0;
+		latest_accel_delta_mg = 0;
 		return;
 	}
 
@@ -2075,10 +2175,15 @@ static void sample_motion(void)
 	}
 
 	latest_accel_milli_g = (int16_t)magnitude_mg;
+	latest_accel_delta_mg = previous_magnitude_mg == 0 ?
+					 0 :
+					 (int16_t)abs_i32((int32_t)magnitude_mg -
+							   previous_magnitude_mg);
 	update_steps_from_lsm6dsl();
 #else
 	motion_status = OP_MOTION_STATUS_UNAVAILABLE;
 	latest_accel_milli_g = 0;
+	latest_accel_delta_mg = 0;
 #endif
 }
 
