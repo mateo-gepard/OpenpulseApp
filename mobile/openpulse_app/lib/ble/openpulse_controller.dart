@@ -92,6 +92,33 @@ class OpenPulseController extends ChangeNotifier {
 
   int? get currentStepCount => latestLiveRecord?.stepCount;
 
+  BatteryEstimate? get batteryEstimate {
+    final battery = latestBattery;
+    if (battery == null || !battery.available || battery.level == null) {
+      return null;
+    }
+
+    const usableCapacityMah = 180.0;
+    const nominalVoltage = 3.7;
+    final level = battery.level!.clamp(0, 100).toInt();
+    final drawMa = _estimatedCurrentDrawMa();
+    final remainingMah = usableCapacityMah * level / 100.0;
+    final runtimeMinutes = drawMa <= 0
+        ? 0
+        : ((remainingMah / drawMa) * 60.0).round();
+
+    return BatteryEstimate(
+      level: level,
+      usableCapacityMah: usableCapacityMah,
+      nominalVoltage: nominalVoltage,
+      estimatedCurrentMa: drawMa,
+      estimatedRemainingMah: remainingMah,
+      estimatedRemainingWh: remainingMah * nominalVoltage / 1000.0,
+      estimatedRuntime: Duration(minutes: runtimeMinutes),
+      basis: 'Estimate: BLE %, 180 mAh usable pack, no current sensor',
+    );
+  }
+
   bool get stepGoalReached {
     final steps = currentStepCount;
     return steps != null && steps >= stepGoal;
@@ -108,6 +135,28 @@ class OpenPulseController extends ChangeNotifier {
     }
     final advName = device.advName;
     return advName.isNotEmpty ? advName : OpenPulseBleContract.advertisedName;
+  }
+
+  double _estimatedCurrentDrawMa() {
+    final ledTotalMa = ledGreenMa + ledRedMa + ledIrMa;
+    final samplingFactor = (samplingHz.clamp(25, 128) / 64.0).toDouble();
+
+    if (rawPpgDiagnosticEnabled) {
+      return 18.0 + ledTotalMa * 0.65 + samplingFactor * 3.0;
+    }
+
+    switch (selectedMode) {
+      case DeviceMode.standby:
+        return 2.5;
+      case DeviceMode.lowPower:
+        return 8.0 + ledTotalMa * 0.08 + samplingFactor;
+      case DeviceMode.hrOnly:
+        return 12.0 + ledGreenMa * 0.20 + samplingFactor * 2.0;
+      case DeviceMode.active:
+        return 14.5 + ledTotalMa * 0.18 + samplingFactor * 2.5;
+      case DeviceMode.shipMode:
+        return 0.2;
+    }
   }
 
   Future<void> initialize() async {

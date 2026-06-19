@@ -718,6 +718,7 @@ class DeviceView extends StatelessWidget {
   Widget build(BuildContext context) {
     final puck = controller.latestPuckStatus;
     final battery = controller.latestBattery;
+    final batteryEstimate = controller.batteryEstimate;
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
@@ -746,6 +747,48 @@ class DeviceView extends StatelessWidget {
               ),
             ],
           ),
+        ),
+        const SizedBox(height: 18),
+        _SectionTitle('Power'),
+        _Surface(
+          child: batteryEstimate == null
+              ? const Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    _FactRow('Remaining', 'Waiting for battery sample'),
+                    _FactRow('Estimated draw', 'Unavailable'),
+                    Text(
+                      'OpenPulse reports battery percentage over BLE. Runtime and current need a battery sample before the app can estimate them.',
+                      style: TextStyle(color: _muted, height: 1.35),
+                    ),
+                  ],
+                )
+              : Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    _ProgressLine(
+                      value: batteryEstimate.level / 100,
+                      color: batteryEstimate.level <= 15 ? _red : _mint,
+                      label: 'Battery',
+                      trailing: '${batteryEstimate.level}%',
+                    ),
+                    const SizedBox(height: 14),
+                    _FactRow('Runtime left', batteryEstimate.runtimeLabel),
+                    _FactRow('Power left', batteryEstimate.remainingLabel),
+                    _FactRow('Estimated draw', batteryEstimate.currentLabel),
+                    _FactRow(
+                      'Mode',
+                      controller.rawPpgDiagnosticEnabled
+                          ? 'Raw diagnostic'
+                          : controller.selectedMode.label,
+                    ),
+                    const SizedBox(height: 8),
+                    Text(
+                      batteryEstimate.basis,
+                      style: const TextStyle(color: _muted, height: 1.35),
+                    ),
+                  ],
+                ),
         ),
         const SizedBox(height: 18),
         _SectionTitle('PPG controls'),
@@ -2171,6 +2214,9 @@ String _dayLabel(DateTime date) {
 
 String _timeAgo(DateTime date) {
   final diff = DateTime.now().difference(date);
+  if (diff.isNegative) {
+    return 'clock sync pending';
+  }
   if (diff.inSeconds < 60) {
     return '${diff.inSeconds}s ago';
   }
@@ -2192,6 +2238,17 @@ String _nextCalibrationLabel(CalibrationTimeline? timeline) {
   if (timeline == null || !timeline.hasData) {
     return 'Next update in -- min';
   }
+  final now = DateTime.now();
+  final latestPointAt = timeline.latestPointAt;
+  if (latestPointAt != null) {
+    final sampleAge = now.difference(latestPointAt);
+    if (sampleAge > const Duration(minutes: 3)) {
+      return 'Last sample ${_durationLabel(sampleAge)} ago';
+    }
+    if (sampleAge < const Duration(minutes: -2)) {
+      return 'Waiting for fresh board time';
+    }
+  }
   final progress = timeline.latestProgress;
   if (progress != null && progress >= 100) {
     return 'Profile ready';
@@ -2199,17 +2256,36 @@ String _nextCalibrationLabel(CalibrationTimeline? timeline) {
   final nextUpdateAt = timeline.nextUpdateAt;
   final remaining = nextUpdateAt == null
       ? timeline.nextUpdateRemaining
-      : nextUpdateAt.isBefore(DateTime.now())
+      : nextUpdateAt.isBefore(now)
       ? Duration.zero
-      : nextUpdateAt.difference(DateTime.now());
+      : nextUpdateAt.difference(now);
   if (remaining == null) {
     return 'Next update in -- min';
+  }
+  if (remaining > const Duration(minutes: 65)) {
+    return 'Next update after fresh sync';
   }
   final minutes = (remaining.inSeconds / 60).ceil().clamp(0, 999);
   if (minutes <= 0) {
     return 'Next update now';
   }
   return 'Next update in $minutes min';
+}
+
+String _durationLabel(Duration duration) {
+  final safe = duration.isNegative ? Duration.zero : duration;
+  if (safe.inMinutes < 1) {
+    return '${safe.inSeconds}s';
+  }
+  if (safe.inHours < 1) {
+    return '${safe.inMinutes}m';
+  }
+  final hours = safe.inHours;
+  final minutes = safe.inMinutes % 60;
+  if (minutes == 0) {
+    return '${hours}h';
+  }
+  return '${hours}h ${minutes}m';
 }
 
 String _calibrationShortLabel(int? value) {

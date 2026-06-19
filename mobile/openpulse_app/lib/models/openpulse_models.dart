@@ -76,6 +76,45 @@ class BatterySample {
   String get display => available && level != null ? '$level%' : 'Unavailable';
 }
 
+class BatteryEstimate {
+  const BatteryEstimate({
+    required this.level,
+    required this.usableCapacityMah,
+    required this.nominalVoltage,
+    required this.estimatedCurrentMa,
+    required this.estimatedRemainingMah,
+    required this.estimatedRemainingWh,
+    required this.estimatedRuntime,
+    required this.basis,
+  });
+
+  final int level;
+  final double usableCapacityMah;
+  final double nominalVoltage;
+  final double estimatedCurrentMa;
+  final double estimatedRemainingMah;
+  final double estimatedRemainingWh;
+  final Duration estimatedRuntime;
+  final String basis;
+
+  String get runtimeLabel {
+    final hours = estimatedRuntime.inMinutes ~/ 60;
+    final minutes = estimatedRuntime.inMinutes % 60;
+    if (hours <= 0) {
+      return '$minutes min';
+    }
+    return '${hours}h ${minutes.toString().padLeft(2, '0')}m';
+  }
+
+  String get remainingLabel =>
+      '${estimatedRemainingMah.toStringAsFixed(0)} mAh · '
+      '${estimatedRemainingWh.toStringAsFixed(2)} Wh';
+
+  String get currentLabel =>
+      '${estimatedCurrentMa.toStringAsFixed(1)} mA · '
+      '${(estimatedCurrentMa * nominalVoltage).toStringAsFixed(0)} mW';
+}
+
 class DaySummary {
   const DaySummary({
     required this.day,
@@ -184,6 +223,7 @@ class CalibrationTimeline {
   final int? latestProgress;
 
   bool get hasData => points.isNotEmpty;
+  DateTime? get latestPointAt => points.isEmpty ? null : points.last.time;
 }
 
 class PuckStatus {

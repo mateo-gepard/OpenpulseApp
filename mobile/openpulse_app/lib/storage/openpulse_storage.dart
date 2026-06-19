@@ -918,10 +918,7 @@ class OpenPulseStorage {
     }
     lastProgressMark ??= marks.isNotEmpty
         ? marks.last
-        : CalibrationUpdateMark(
-            time: points.first.time,
-            progress: latestProgress,
-          );
+        : CalibrationUpdateMark(time: latestTime, progress: latestProgress);
 
     return lastProgressMark.time.add(const Duration(hours: 1));
   }
