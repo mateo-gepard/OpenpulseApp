@@ -27,18 +27,23 @@ explicitly requests a raw PPG window.
 Heart rate uses green PPG because it usually gives the strongest short-path wrist
 or finger perfusion signal.
 
-The firmware:
+The firmware uses a lightweight HeartPy-style adaptive threshold pipeline:
 
 1. Maintains a circular green PPG window.
-2. Computes adaptive min, max, and mean over the recent window.
-3. Rejects windows with low dynamic range, clipping, or too few samples.
+2. Computes adaptive min, max, mean, and dynamic range over the recent window.
+3. Learns a rolling AC/DC baseline for the user's current optical fit.
 4. Finds local maxima above an adaptive threshold.
 5. Enforces a physiological IBI range of 333-2000 ms.
 6. Uses the median IBI from recent accepted peaks.
-7. Converts IBI to heart rate with `bpm = 60000 / ibi_ms`.
+7. Rejects sudden HR jumps as likely spikes unless confidence is already high.
+8. Smooths accepted HR/IBI values and holds the last good value through brief bad
+   windows instead of blinking to unavailable.
+9. Converts IBI to heart rate with `bpm = 60000 / ibi_ms`.
 
-Confidence ramps during the first 2 minutes, increases with clean beat count, and
-drops under motion artifact or low perfusion.
+Confidence ramps during the first 2 minutes, increases with clean beat count and
+calibration progress, and drops under motion artifact or low perfusion. During
+calibration the app still receives the current provisional value, but the quality
+flag marks it as calibrating.
 
 ## HRV
 
@@ -68,8 +73,10 @@ SpO2 = 110 - 25 * R
 ```
 
 The firmware derives AC from the recent min/max range and DC from the mean for
-red and IR samples. It rejects low-perfusion windows and reports `0xFF` when
-SpO2 is unavailable.
+red and IR samples. It learns a rolling red/IR ratio baseline, filters accepted
+ratios, rejects implausible ratio spikes, and holds the last good SpO2 value
+through brief noisy windows. It only reports `0xFF` when no recent usable value is
+available or the sensor path is unavailable.
 
 This is an empirical estimate. Real clinical-grade SpO2 requires device-specific
 calibration against a reference pulse oximeter or controlled desaturation data.
@@ -80,12 +87,19 @@ the optical metric as calibrating/experimental.
 
 | Signal | First usable output | Full local window | Baseline target | Max confidence |
 |---|---:|---:|---:|---:|
-| HR | After enough clean peaks | 2 minutes | None | 100 |
-| SpO2 | After red/IR windows are stable | 10 minutes | Needs external reference for true accuracy | 95 |
+| HR | After enough clean peaks | 2 minutes | 24 hourly profile commits | 100 |
+| SpO2 | After red/IR windows are stable | 10 minutes | 24 hourly profile commits plus external reference for true accuracy | 95 |
 | HRV | After 5 clean minutes | 5 minutes | 14 clean days | 95 |
+
+The optical calibration profile updates in two layers:
+
+1. A fast rolling baseline updates on every good FIFO drain so the display stops
+   flickering during the first minutes.
+2. A slow calibration profile commits once per hour when enough clean windows
+   were observed. The optical calibration percentage reaches 30% during the
+   initial warmup, then moves toward 100% across 24 hourly commits.
 
 Confidence is an algorithm-quality score. It is not a medical accuracy guarantee.
 Charging the prototype between sessions is fine; stored app data is kept, and the
 baseline progress is based on clean days rather than one uninterrupted battery
 run.
-

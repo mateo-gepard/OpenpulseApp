@@ -76,6 +76,11 @@ LOG_MODULE_REGISTER(openpulse, LOG_LEVEL_INF);
 #define OP_PPG_SPO2_CALIBRATION_MS 600000
 #define OP_PPG_POLL_MS 250
 #define OP_LIVE_NOTIFY_MS 1000
+#define OP_OPTICAL_HOLD_MS 15000
+#define OP_OPTICAL_FIRST_CAL_MS 120000
+#define OP_OPTICAL_CAL_HOUR_MS 3600000
+#define OP_OPTICAL_CAL_FULL_HOURS 24
+#define OP_OPTICAL_MIN_GOOD_HOUR_WINDOWS 60
 
 #define OP_EVENT_ATTACHED 1
 #define OP_EVENT_REMOVED 2
@@ -105,6 +110,47 @@ enum op_mode {
 	OP_MODE_LOW_POWER = 2,
 	OP_MODE_HR_ONLY = 3,
 	OP_MODE_SHIP = 4,
+};
+
+struct ppg_window_stats {
+	uint32_t green_min;
+	uint32_t green_max;
+	uint64_t green_sum;
+	uint16_t green_count;
+	uint32_t red_min;
+	uint32_t red_max;
+	uint64_t red_sum;
+	uint16_t red_count;
+	uint32_t ir_min;
+	uint32_t ir_max;
+	uint64_t ir_sum;
+	uint16_t ir_count;
+	uint32_t ratio_x1000;
+};
+
+struct optical_calibration_state {
+	bool initialized;
+	uint32_t green_dc_ema;
+	uint32_t green_ac_ema;
+	uint32_t red_dc_ema;
+	uint32_t red_ac_ema;
+	uint32_t ir_dc_ema;
+	uint32_t ir_ac_ema;
+	uint32_t ratio_x1000_ema;
+	uint64_t hour_green_dc_sum;
+	uint64_t hour_green_ac_sum;
+	uint64_t hour_red_dc_sum;
+	uint64_t hour_red_ac_sum;
+	uint64_t hour_ir_dc_sum;
+	uint64_t hour_ir_ac_sum;
+	uint64_t hour_ratio_sum;
+	uint16_t hour_good_windows;
+	uint16_t accepted_hr_windows;
+	uint16_t accepted_spo2_windows;
+	uint16_t rejected_windows;
+	uint8_t hourly_updates;
+	int64_t started_ms;
+	int64_t last_hour_update_ms;
 };
 
 static struct bt_conn *current_conn;
@@ -151,12 +197,16 @@ static uint16_t ppg_green_head;
 static uint16_t ppg_green_count;
 static uint32_t ppg_green_sample_index;
 static int64_t ppg_metrics_started_ms;
+static struct optical_calibration_state optical_cal;
 static uint16_t latest_hr_x10;
 static uint16_t latest_ibi_ms;
 static uint8_t latest_spo2_percent = 0xff;
 static uint8_t latest_hr_confidence;
 static uint8_t latest_spo2_confidence;
 static uint8_t latest_metric_calibration;
+static int64_t latest_hr_valid_ms;
+static int64_t latest_spo2_valid_ms;
+static uint32_t spo2_ratio_filtered_x1000;
 static int64_t last_live_notification_ms;
 static uint8_t last_puck_status[4] = {
 	OP_EVENT_REMOVED,
@@ -283,6 +333,7 @@ static void update_puck_status(uint8_t sensor_status);
 static uint8_t probe_maxm86161(void);
 static uint8_t prepare_maxm86161(void);
 static void stop_maxm86161(void);
+static void ppg_buffer_reset(void);
 static int read_maxm86161_fifo_payload(uint8_t *payload,
 				       uint8_t max_payload_len,
 				       uint8_t *payload_len);
@@ -909,22 +960,25 @@ static void stop_maxm86161(void)
 #if OPENPULSE_HAS_I2C
 	if (active_ppg_i2c == NULL && probe_maxm86161() != OP_SENSOR_STATUS_OK) {
 		maxm86161_configured = false;
-		return;
+	} else {
+		if (maxm86161_write_reg(MAXM86161_REG_SYSTEM_CONTROL,
+					MAXM86161_SYSTEM_SINGLE_PPG | MAXM86161_SYSTEM_SHDN)) {
+			LOG_WRN("MAXM86161 shutdown failed");
+		}
+		maxm86161_configured = false;
 	}
-
-	if (maxm86161_write_reg(MAXM86161_REG_SYSTEM_CONTROL,
-				MAXM86161_SYSTEM_SINGLE_PPG | MAXM86161_SYSTEM_SHDN)) {
-		LOG_WRN("MAXM86161 shutdown failed");
-	}
-	maxm86161_configured = false;
 #endif
 	ppg_metrics_started_ms = 0;
+	ppg_buffer_reset();
 	latest_hr_x10 = 0;
 	latest_ibi_ms = 0;
 	latest_spo2_percent = 0xff;
 	latest_hr_confidence = 0;
 	latest_spo2_confidence = 0;
 	latest_metric_calibration = 0;
+	latest_hr_valid_ms = 0;
+	latest_spo2_valid_ms = 0;
+	spo2_ratio_filtered_x1000 = 0;
 }
 
 static uint8_t confidence_ramp(int64_t started_ms, uint32_t target_ms)
@@ -946,9 +1000,102 @@ static uint8_t confidence_ramp(int64_t started_ms, uint32_t target_ms)
 	return (uint8_t)(((uint64_t)elapsed_ms * 100U) / target_ms);
 }
 
-static uint8_t min_u8(uint8_t a, uint8_t b)
+static uint32_t max_u32(uint32_t a, uint32_t b)
+{
+	return a > b ? a : b;
+}
+
+static uint32_t min_u32(uint32_t a, uint32_t b)
 {
 	return a < b ? a : b;
+}
+
+static uint32_t abs_i32(int32_t value)
+{
+	return value < 0 ? (uint32_t)-value : (uint32_t)value;
+}
+
+static uint32_t ema_u32(uint32_t current, uint32_t sample, uint8_t sample_weight)
+{
+	uint8_t keep_weight;
+
+	if (current == 0) {
+		return sample;
+	}
+
+	if (sample_weight > 16U) {
+		sample_weight = 16U;
+	}
+	keep_weight = 16U - sample_weight;
+
+	return (uint32_t)(((uint64_t)current * keep_weight +
+			   (uint64_t)sample * sample_weight +
+			   8U) / 16U);
+}
+
+static uint32_t stats_mean(uint64_t sum, uint16_t count)
+{
+	if (count == 0) {
+		return 0;
+	}
+
+	return (uint32_t)(sum / count);
+}
+
+static uint32_t stats_range(uint32_t min, uint32_t max)
+{
+	return max > min ? max - min : 0;
+}
+
+static uint8_t decay_confidence(uint8_t confidence, int64_t age_ms, uint8_t floor)
+{
+	uint32_t decay;
+
+	if (confidence <= floor) {
+		return confidence;
+	}
+
+	if (age_ms < 0) {
+		age_ms = 0;
+	}
+
+	decay = 12U + (uint32_t)(age_ms / 1000) * 4U;
+	if (decay >= confidence - floor) {
+		return floor;
+	}
+
+	return (uint8_t)(confidence - decay);
+}
+
+static void hold_hr_value(uint8_t *quality)
+{
+	int64_t age_ms = latest_hr_valid_ms > 0 ? k_uptime_get() - latest_hr_valid_ms :
+						 OP_OPTICAL_HOLD_MS + 1;
+
+	*quality |= OP_QUALITY_LOW_PERFUSION | OP_QUALITY_PPG_UNCALIBRATED;
+	if (latest_hr_x10 != 0 && age_ms <= OP_OPTICAL_HOLD_MS) {
+		latest_hr_confidence = decay_confidence(latest_hr_confidence, age_ms, 8);
+		return;
+	}
+
+	latest_hr_x10 = 0;
+	latest_ibi_ms = 0;
+	latest_hr_confidence = 0;
+}
+
+static void hold_spo2_value(uint8_t *quality)
+{
+	int64_t age_ms = latest_spo2_valid_ms > 0 ? k_uptime_get() - latest_spo2_valid_ms :
+						    OP_OPTICAL_HOLD_MS + 1;
+
+	*quality |= OP_QUALITY_LOW_PERFUSION | OP_QUALITY_PPG_UNCALIBRATED;
+	if (latest_spo2_percent != 0xff && age_ms <= OP_OPTICAL_HOLD_MS) {
+		latest_spo2_confidence = decay_confidence(latest_spo2_confidence, age_ms, 8);
+		return;
+	}
+
+	latest_spo2_percent = 0xff;
+	latest_spo2_confidence = 0;
 }
 
 static void ppg_buffer_reset(void)
@@ -997,6 +1144,188 @@ static uint16_t median_u16(uint16_t *values, uint8_t count)
 	return values[count / 2U];
 }
 
+static void ppg_stats_init(struct ppg_window_stats *stats)
+{
+	memset(stats, 0, sizeof(*stats));
+	stats->green_min = UINT32_MAX;
+	stats->red_min = UINT32_MAX;
+	stats->ir_min = UINT32_MAX;
+}
+
+static void ppg_stats_add_green(struct ppg_window_stats *stats, uint32_t sample)
+{
+	if (sample < stats->green_min) {
+		stats->green_min = sample;
+	}
+	if (sample > stats->green_max) {
+		stats->green_max = sample;
+	}
+	stats->green_sum += sample;
+	stats->green_count++;
+}
+
+static void ppg_stats_add_red(struct ppg_window_stats *stats, uint32_t sample)
+{
+	if (sample < stats->red_min) {
+		stats->red_min = sample;
+	}
+	if (sample > stats->red_max) {
+		stats->red_max = sample;
+	}
+	stats->red_sum += sample;
+	stats->red_count++;
+}
+
+static void ppg_stats_add_ir(struct ppg_window_stats *stats, uint32_t sample)
+{
+	if (sample < stats->ir_min) {
+		stats->ir_min = sample;
+	}
+	if (sample > stats->ir_max) {
+		stats->ir_max = sample;
+	}
+	stats->ir_sum += sample;
+	stats->ir_count++;
+}
+
+static uint8_t optical_calibration_progress(void)
+{
+	uint32_t initial_progress = 0;
+	uint32_t hourly_progress;
+	int64_t elapsed_ms;
+
+	if (optical_cal.started_ms <= 0) {
+		return 0;
+	}
+
+	elapsed_ms = k_uptime_get() - optical_cal.started_ms;
+	if (elapsed_ms > 0) {
+		initial_progress = (uint32_t)(((uint64_t)elapsed_ms * 30U) /
+					      OP_OPTICAL_FIRST_CAL_MS);
+		if (initial_progress > 30U) {
+			initial_progress = 30U;
+		}
+	}
+
+	hourly_progress = ((uint32_t)optical_cal.hourly_updates * 70U) /
+			  OP_OPTICAL_CAL_FULL_HOURS;
+	if (hourly_progress > 70U) {
+		hourly_progress = 70U;
+	}
+
+	return (uint8_t)min_u32(100U, initial_progress + hourly_progress);
+}
+
+static void optical_calibration_commit_hour(uint32_t green_dc,
+					    uint32_t green_ac,
+					    uint32_t red_dc,
+					    uint32_t red_ac,
+					    uint32_t ir_dc,
+					    uint32_t ir_ac,
+					    uint32_t ratio_x1000)
+{
+	optical_cal.green_dc_ema = ema_u32(optical_cal.green_dc_ema, green_dc, 4);
+	optical_cal.green_ac_ema = ema_u32(optical_cal.green_ac_ema, green_ac, 4);
+	optical_cal.red_dc_ema = ema_u32(optical_cal.red_dc_ema, red_dc, 4);
+	optical_cal.red_ac_ema = ema_u32(optical_cal.red_ac_ema, red_ac, 4);
+	optical_cal.ir_dc_ema = ema_u32(optical_cal.ir_dc_ema, ir_dc, 4);
+	optical_cal.ir_ac_ema = ema_u32(optical_cal.ir_ac_ema, ir_ac, 4);
+	optical_cal.ratio_x1000_ema = ema_u32(optical_cal.ratio_x1000_ema, ratio_x1000, 4);
+	if (optical_cal.hourly_updates < OP_OPTICAL_CAL_FULL_HOURS) {
+		optical_cal.hourly_updates++;
+	}
+	LOG_INF("Optical calibration hour %u/%u committed",
+		optical_cal.hourly_updates, OP_OPTICAL_CAL_FULL_HOURS);
+}
+
+static void update_optical_calibration(struct ppg_window_stats *stats,
+				       uint8_t *quality)
+{
+	uint32_t green_dc = stats_mean(stats->green_sum, stats->green_count);
+	uint32_t red_dc = stats_mean(stats->red_sum, stats->red_count);
+	uint32_t ir_dc = stats_mean(stats->ir_sum, stats->ir_count);
+	uint32_t green_ac = stats_range(stats->green_min, stats->green_max);
+	uint32_t red_ac = stats_range(stats->red_min, stats->red_max);
+	uint32_t ir_ac = stats_range(stats->ir_min, stats->ir_max);
+	bool green_good = stats->green_count >= 8U && green_dc > 0 && green_ac >= 300U;
+	bool red_ir_good = stats->red_count >= 8U && stats->ir_count >= 8U &&
+			   red_dc > 0 && ir_dc > 0 && red_ac >= 120U && ir_ac >= 120U;
+	int64_t now_ms = k_uptime_get();
+
+	if (optical_cal.started_ms == 0) {
+		optical_cal.started_ms = now_ms;
+		optical_cal.last_hour_update_ms = now_ms;
+	}
+
+	if (green_good) {
+		optical_cal.green_dc_ema = ema_u32(optical_cal.green_dc_ema, green_dc, 2);
+		optical_cal.green_ac_ema = ema_u32(optical_cal.green_ac_ema, green_ac, 3);
+	}
+
+	if (red_ir_good) {
+		uint32_t ratio_x1000 = (uint32_t)(((uint64_t)red_ac * ir_dc * 1000U) /
+						  ((uint64_t)ir_ac * red_dc));
+		if (ratio_x1000 >= 250U && ratio_x1000 <= 2200U) {
+			optical_cal.ratio_x1000_ema =
+				ema_u32(optical_cal.ratio_x1000_ema, ratio_x1000, 2);
+			optical_cal.red_dc_ema = ema_u32(optical_cal.red_dc_ema, red_dc, 2);
+			optical_cal.red_ac_ema = ema_u32(optical_cal.red_ac_ema, red_ac, 3);
+			optical_cal.ir_dc_ema = ema_u32(optical_cal.ir_dc_ema, ir_dc, 2);
+			optical_cal.ir_ac_ema = ema_u32(optical_cal.ir_ac_ema, ir_ac, 3);
+			stats->ratio_x1000 = ratio_x1000;
+		}
+	}
+
+	if (green_good && red_ir_good && stats->ratio_x1000 > 0 &&
+	    latest_accel_milli_g >= 850 && latest_accel_milli_g <= 1150) {
+		optical_cal.initialized = true;
+		optical_cal.hour_green_dc_sum += green_dc;
+		optical_cal.hour_green_ac_sum += green_ac;
+		optical_cal.hour_red_dc_sum += red_dc;
+		optical_cal.hour_red_ac_sum += red_ac;
+		optical_cal.hour_ir_dc_sum += ir_dc;
+		optical_cal.hour_ir_ac_sum += ir_ac;
+		optical_cal.hour_ratio_sum += stats->ratio_x1000;
+		optical_cal.hour_good_windows++;
+	} else {
+		optical_cal.rejected_windows++;
+	}
+
+	if (green_ac > 0x78000U || red_ac > 0x78000U || ir_ac > 0x78000U) {
+		*quality |= OP_QUALITY_PPG_CLIPPING;
+	}
+
+	if (now_ms - optical_cal.last_hour_update_ms >= OP_OPTICAL_CAL_HOUR_MS) {
+		if (optical_cal.hour_good_windows >= OP_OPTICAL_MIN_GOOD_HOUR_WINDOWS) {
+			optical_calibration_commit_hour(
+				(uint32_t)(optical_cal.hour_green_dc_sum /
+					   optical_cal.hour_good_windows),
+				(uint32_t)(optical_cal.hour_green_ac_sum /
+					   optical_cal.hour_good_windows),
+				(uint32_t)(optical_cal.hour_red_dc_sum /
+					   optical_cal.hour_good_windows),
+				(uint32_t)(optical_cal.hour_red_ac_sum /
+					   optical_cal.hour_good_windows),
+				(uint32_t)(optical_cal.hour_ir_dc_sum /
+					   optical_cal.hour_good_windows),
+				(uint32_t)(optical_cal.hour_ir_ac_sum /
+					   optical_cal.hour_good_windows),
+				(uint32_t)(optical_cal.hour_ratio_sum /
+					   optical_cal.hour_good_windows));
+		}
+
+		optical_cal.hour_green_dc_sum = 0;
+		optical_cal.hour_green_ac_sum = 0;
+		optical_cal.hour_red_dc_sum = 0;
+		optical_cal.hour_red_ac_sum = 0;
+		optical_cal.hour_ir_dc_sum = 0;
+		optical_cal.hour_ir_ac_sum = 0;
+		optical_cal.hour_ratio_sum = 0;
+		optical_cal.hour_good_windows = 0;
+		optical_cal.last_hour_update_ms = now_ms;
+	}
+}
+
 static void compute_hr_from_green(uint8_t *quality)
 {
 	uint32_t window_ms;
@@ -1006,6 +1335,8 @@ static void compute_hr_from_green(uint8_t *quality)
 	uint64_t sum = 0;
 	uint32_t mean;
 	uint32_t threshold;
+	uint32_t dynamic_range;
+	uint32_t learned_min_range;
 	uint32_t previous_peak_ms = 0;
 	uint32_t previous_value = 0;
 	uint32_t current_value;
@@ -1015,13 +1346,13 @@ static void compute_hr_from_green(uint8_t *quality)
 	uint8_t interval_count = 0;
 	uint8_t peak_count = 0;
 	uint16_t confidence;
-
-	latest_hr_x10 = 0;
-	latest_ibi_ms = 0;
-	latest_hr_confidence = 0;
+	uint16_t new_ibi_ms;
+	uint16_t new_hr_x10;
+	uint8_t calibration = optical_calibration_progress();
+	int64_t now_ms = k_uptime_get();
 
 	if (ppg_green_count < sampling_hz * 4U || sampling_hz == 0) {
-		*quality |= OP_QUALITY_LOW_PERFUSION | OP_QUALITY_PPG_UNCALIBRATED;
+		hold_hr_value(quality);
 		return;
 	}
 
@@ -1045,20 +1376,23 @@ static void compute_hr_from_green(uint8_t *quality)
 	}
 
 	if (window_count < sampling_hz * 4U || max_sample <= min_sample || sum == 0) {
-		*quality |= OP_QUALITY_LOW_PERFUSION;
+		hold_hr_value(quality);
 		return;
 	}
 
 	mean = (uint32_t)(sum / window_count);
-	if (max_sample - min_sample < 600U) {
-		*quality |= OP_QUALITY_LOW_PERFUSION;
+	dynamic_range = max_sample - min_sample;
+	learned_min_range = optical_cal.green_ac_ema > 0 ?
+			    max_u32(250U, optical_cal.green_ac_ema / 7U) : 450U;
+	if (dynamic_range < learned_min_range) {
+		hold_hr_value(quality);
 		return;
 	}
 	if (max_sample > 0x7a000U || min_sample < 200U) {
 		*quality |= OP_QUALITY_PPG_CLIPPING;
 	}
 
-	threshold = mean + ((max_sample - min_sample) * 28U) / 100U;
+	threshold = mean + (dynamic_range * (optical_cal.initialized ? 22U : 28U)) / 100U;
 
 	for (uint16_t n = 1; n + 1U < ppg_green_count; n++) {
 		uint16_t idx_prev = (ppg_green_head + OP_PPG_BUFFER_LEN - ppg_green_count + n - 1U) % OP_PPG_BUFFER_LEN;
@@ -1093,23 +1427,23 @@ static void compute_hr_from_green(uint8_t *quality)
 		previous_peak_ms = sample_ms;
 	}
 
-	if (interval_count < 2) {
-		*quality |= OP_QUALITY_LOW_PERFUSION;
+	if (interval_count < 1) {
+		hold_hr_value(quality);
 		return;
 	}
 
-	latest_ibi_ms = median_u16(intervals, interval_count);
-	if (latest_ibi_ms == 0) {
-		*quality |= OP_QUALITY_LOW_PERFUSION;
+	new_ibi_ms = median_u16(intervals, interval_count);
+	if (new_ibi_ms == 0) {
+		hold_hr_value(quality);
 		return;
 	}
 
-	latest_hr_x10 = (uint16_t)((600000U + (latest_ibi_ms / 2U)) / latest_ibi_ms);
-	confidence = (uint16_t)confidence_ramp(ppg_metrics_started_ms, OP_PPG_HR_CALIBRATION_MS);
-	if (confidence > 90U) {
-		confidence = 90U;
-	}
-	confidence += interval_count * 3U;
+	new_hr_x10 = (uint16_t)((600000U + (new_ibi_ms / 2U)) / new_ibi_ms);
+	confidence = 18U + (uint16_t)((uint32_t)confidence_ramp(
+					      ppg_metrics_started_ms,
+					      OP_PPG_HR_CALIBRATION_MS) * 35U / 100U);
+	confidence += (uint16_t)calibration / 3U;
+	confidence += interval_count * 5U;
 	if (confidence > 100U) {
 		confidence = 100U;
 	}
@@ -1118,11 +1452,32 @@ static void compute_hr_from_green(uint8_t *quality)
 		confidence = confidence > 30U ? confidence - 30U : 0U;
 	}
 
-	if (confidence < 45U) {
+	if (latest_hr_x10 != 0 && latest_hr_valid_ms > 0 &&
+	    abs_i32((int32_t)new_hr_x10 - (int32_t)latest_hr_x10) > 250U &&
+	    confidence < 85U) {
+		*quality |= OP_QUALITY_MOTION_ARTIFACT | OP_QUALITY_PPG_UNCALIBRATED;
+		optical_cal.rejected_windows++;
+		hold_hr_value(quality);
+		return;
+	}
+
+	if (latest_hr_x10 != 0 && latest_hr_valid_ms > 0) {
+		latest_hr_x10 = (uint16_t)(((uint32_t)latest_hr_x10 * 3U +
+					    (uint32_t)new_hr_x10 * 2U + 2U) / 5U);
+		latest_ibi_ms = (uint16_t)(((uint32_t)latest_ibi_ms * 3U +
+					    (uint32_t)new_ibi_ms * 2U + 2U) / 5U);
+	} else {
+		latest_hr_x10 = new_hr_x10;
+		latest_ibi_ms = new_ibi_ms;
+	}
+
+	latest_hr_valid_ms = now_ms;
+	if (confidence < 70U) {
 		*quality |= OP_QUALITY_PPG_UNCALIBRATED;
 	}
 	*quality |= OP_QUALITY_SKIN_CONTACT;
 	latest_hr_confidence = (uint8_t)confidence;
+	optical_cal.accepted_hr_windows++;
 	ARG_UNUSED(peak_count);
 }
 
@@ -1141,13 +1496,15 @@ static void compute_spo2_from_window(uint32_t red_min,
 	uint32_t red_ac;
 	uint32_t ir_ac;
 	uint32_t ratio_x1000;
+	uint32_t ratio_used_x1000;
+	uint32_t profile_weight;
 	int32_t spo2;
 	uint16_t confidence;
-
-	latest_spo2_percent = 0xff;
-	latest_spo2_confidence = 0;
+	uint8_t calibration = optical_calibration_progress();
+	int64_t now_ms = k_uptime_get();
 
 	if (red_count < 12U || ir_count < 12U || red_sum == 0 || ir_sum == 0) {
+		hold_spo2_value(quality);
 		return;
 	}
 
@@ -1157,13 +1514,61 @@ static void compute_spo2_from_window(uint32_t red_min,
 	ir_ac = ir_max > ir_min ? ir_max - ir_min : 0;
 
 	if (red_dc == 0 || ir_dc == 0 || red_ac < 200U || ir_ac < 200U) {
-		*quality |= OP_QUALITY_LOW_PERFUSION;
+		hold_spo2_value(quality);
 		return;
 	}
 
 	ratio_x1000 = (uint32_t)(((uint64_t)red_ac * ir_dc * 1000U) /
 				 ((uint64_t)ir_ac * red_dc));
-	spo2 = 110 - (int32_t)((25U * ratio_x1000 + 500U) / 1000U);
+	if (ratio_x1000 < 250U || ratio_x1000 > 2200U) {
+		hold_spo2_value(quality);
+		return;
+	}
+
+	confidence = 15U + (uint16_t)((uint32_t)confidence_ramp(
+					      ppg_metrics_started_ms,
+					      OP_PPG_SPO2_CALIBRATION_MS) * 20U / 100U);
+	confidence += (uint16_t)((uint32_t)calibration * 45U / 100U);
+	if (red_count > 24U && ir_count > 24U) {
+		confidence += 12U;
+	}
+	if (red_count > 48U && ir_count > 48U) {
+		confidence += 8U;
+	}
+	if (latest_accel_milli_g > 1150 || latest_accel_milli_g < 850) {
+		*quality |= OP_QUALITY_MOTION_ARTIFACT;
+		confidence = confidence > 25U ? confidence - 25U : 0U;
+	}
+
+	if (spo2_ratio_filtered_x1000 != 0 &&
+	    abs_i32((int32_t)ratio_x1000 - (int32_t)spo2_ratio_filtered_x1000) > 450U &&
+	    confidence < 80U) {
+		*quality |= OP_QUALITY_MOTION_ARTIFACT | OP_QUALITY_PPG_UNCALIBRATED;
+		optical_cal.rejected_windows++;
+		hold_spo2_value(quality);
+		return;
+	}
+
+	if (spo2_ratio_filtered_x1000 == 0) {
+		spo2_ratio_filtered_x1000 = ratio_x1000;
+	} else {
+		spo2_ratio_filtered_x1000 =
+			ema_u32(spo2_ratio_filtered_x1000, ratio_x1000,
+				calibration >= 50U ? 4U : 7U);
+	}
+
+	profile_weight = min_u32(25U, (uint32_t)optical_cal.hourly_updates);
+	if (optical_cal.ratio_x1000_ema > 0 && profile_weight > 0) {
+		ratio_used_x1000 =
+			(uint32_t)(((uint64_t)spo2_ratio_filtered_x1000 *
+				    (100U - profile_weight) +
+				    (uint64_t)optical_cal.ratio_x1000_ema *
+				    profile_weight) / 100U);
+	} else {
+		ratio_used_x1000 = spo2_ratio_filtered_x1000;
+	}
+
+	spo2 = 110 - (int32_t)((25U * ratio_used_x1000 + 500U) / 1000U);
 	if (spo2 > 100) {
 		spo2 = 100;
 	}
@@ -1171,40 +1576,27 @@ static void compute_spo2_from_window(uint32_t red_min,
 		spo2 = 70;
 	}
 
-	confidence = confidence_ramp(ppg_metrics_started_ms, OP_PPG_SPO2_CALIBRATION_MS);
-	if (confidence > 85U) {
-		confidence = 85U;
-	}
-	if (red_count > 32U && ir_count > 32U) {
-		confidence += 10U;
-	}
-	if (latest_accel_milli_g > 1150 || latest_accel_milli_g < 850) {
-		*quality |= OP_QUALITY_MOTION_ARTIFACT;
-		confidence = confidence > 25U ? confidence - 25U : 0U;
-	}
 	if (confidence > 95U) {
 		confidence = 95U;
 	}
 
 	latest_spo2_percent = (uint8_t)spo2;
 	latest_spo2_confidence = (uint8_t)confidence;
-	*quality |= OP_QUALITY_PPG_UNCALIBRATED;
+	latest_spo2_valid_ms = now_ms;
+	optical_cal.accepted_spo2_windows++;
+	if (confidence < 90U || calibration < 100U) {
+		*quality |= OP_QUALITY_PPG_UNCALIBRATED;
+	}
 }
 
 static void update_optical_metrics(uint8_t *quality)
 {
 	uint8_t payload[OP_RAW_MAX_PAYLOAD_BYTES];
 	uint8_t payload_len = 0;
-	uint32_t red_min = UINT32_MAX;
-	uint32_t red_max = 0;
-	uint32_t ir_min = UINT32_MAX;
-	uint32_t ir_max = 0;
-	uint64_t red_sum = 0;
-	uint64_t ir_sum = 0;
-	uint16_t red_count = 0;
-	uint16_t ir_count = 0;
+	struct ppg_window_stats stats;
 	uint8_t sensor_status;
 
+	ppg_stats_init(&stats);
 	sensor_status = prepare_maxm86161();
 	update_puck_status(sensor_status);
 	if (sensor_status != OP_SENSOR_STATUS_OK) {
@@ -1224,7 +1616,8 @@ static void update_optical_metrics(uint8_t *quality)
 	}
 
 	if (read_maxm86161_fifo_payload(payload, sizeof(payload), &payload_len)) {
-		*quality |= OP_QUALITY_LOW_PERFUSION;
+		hold_hr_value(quality);
+		hold_spo2_value(quality);
 		return;
 	}
 
@@ -1236,37 +1629,26 @@ static void update_optical_metrics(uint8_t *quality)
 
 		switch (tag) {
 		case 1:
+			ppg_stats_add_green(&stats, sample);
 			ppg_buffer_push(sample);
 			break;
 		case 2:
-			if (sample < ir_min) {
-				ir_min = sample;
-			}
-			if (sample > ir_max) {
-				ir_max = sample;
-			}
-			ir_sum += sample;
-			ir_count++;
+			ppg_stats_add_ir(&stats, sample);
 			break;
 		case 3:
-			if (sample < red_min) {
-				red_min = sample;
-			}
-			if (sample > red_max) {
-				red_max = sample;
-			}
-			red_sum += sample;
-			red_count++;
+			ppg_stats_add_red(&stats, sample);
 			break;
 		default:
 			break;
 		}
 	}
 
+	update_optical_calibration(&stats, quality);
 	compute_hr_from_green(quality);
-	compute_spo2_from_window(red_min, red_max, red_sum, red_count,
-				 ir_min, ir_max, ir_sum, ir_count, quality);
-	latest_metric_calibration = min_u8(latest_hr_confidence, latest_spo2_confidence);
+	compute_spo2_from_window(stats.red_min, stats.red_max, stats.red_sum, stats.red_count,
+				 stats.ir_min, stats.ir_max, stats.ir_sum, stats.ir_count,
+				 quality);
+	latest_metric_calibration = optical_calibration_progress();
 }
 
 static int read_maxm86161_fifo_payload(uint8_t *payload,
