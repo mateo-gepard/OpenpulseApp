@@ -8,6 +8,7 @@ class OpenPulseBleContract {
   static const advertisedName = 'OpenPulse';
   static const legacyLiveRecordLength = 12;
   static const activityLiveRecordLength = 17;
+  static const metricsLiveRecordLength = 20;
 
   static final serviceUuid = Guid('f04d0000-57f5-4f5a-9b80-4f6f2f1d0001');
   static final controlUuid = Guid('f04d0001-57f5-4f5a-9b80-4f6f2f1d0001');
@@ -184,7 +185,7 @@ class OpenPulseBleContract {
     final samples = <int>[];
     for (var i = 0; i + 2 < payload.length; i += 3) {
       samples.add(
-        ((payload[i] & 0x1f) << 16) | (payload[i + 1] << 8) | payload[i + 2],
+        ((payload[i] & 0x07) << 16) | (payload[i + 1] << 8) | payload[i + 2],
       );
     }
     return samples;
@@ -205,7 +206,9 @@ class OpenPulseBleContract {
     final sequence = data.getUint16(2, Endian.little);
     final availableRecordBytes = bytes.length - 4;
     final recordLength =
-        count > 0 && availableRecordBytes >= count * activityLiveRecordLength
+        count > 0 && availableRecordBytes >= count * metricsLiveRecordLength
+        ? metricsLiveRecordLength
+        : count > 0 && availableRecordBytes >= count * activityLiveRecordLength
         ? activityLiveRecordLength
         : legacyLiveRecordLength;
     var offset = 4;
@@ -228,6 +231,15 @@ class OpenPulseBleContract {
       final motionStatus = recordLength >= activityLiveRecordLength
           ? data.getUint8(offset + 16)
           : null;
+      final hrConfidence = recordLength >= metricsLiveRecordLength
+          ? data.getUint8(offset + 17)
+          : null;
+      final spo2Confidence = recordLength >= metricsLiveRecordLength
+          ? data.getUint8(offset + 18)
+          : null;
+      final calibrationProgress = recordLength >= metricsLiveRecordLength
+          ? data.getUint8(offset + 19)
+          : null;
       deviceUptime += delta;
 
       final wallTimeMs = syncedUnixMs + (deviceUptime - syncedDeviceUptimeMs);
@@ -244,6 +256,9 @@ class OpenPulseBleContract {
           qualityFlags: quality,
           stepCount: stepCount,
           motionStatus: motionStatus,
+          hrConfidence: hrConfidence,
+          spo2Confidence: spo2Confidence,
+          calibrationProgress: calibrationProgress,
         ),
       );
       offset += recordLength;

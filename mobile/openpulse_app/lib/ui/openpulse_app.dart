@@ -198,6 +198,7 @@ class TodayView extends StatelessWidget {
     final battery = controller.latestBattery;
     final puck = controller.latestPuckStatus;
     final summary = controller.selectedDaySummary;
+    final hrv = controller.latestHrvSummary;
     final steps = live?.stepCount ?? summary?.maxSteps;
     final stepProgress = steps == null
         ? 0.0
@@ -230,6 +231,22 @@ class TodayView extends StatelessWidget {
                   : (controller.livePacketCount / 120).clamp(0.0, 1.0),
               color: _blue,
             ),
+            _MetricRing(
+              label: 'HR',
+              value: live?.heartRateBpm == null
+                  ? '--'
+                  : live!.heartRateBpm!.toStringAsFixed(0),
+              footer: live?.hrConfidenceLabel ?? 'warming up',
+              progress: ((live?.hrConfidence ?? 0) / 100).clamp(0.0, 1.0),
+              color: _red,
+            ),
+            _MetricRing(
+              label: 'SpO2',
+              value: live?.spo2Percent == null ? '--' : '${live!.spo2Percent}',
+              footer: live?.spo2ConfidenceLabel ?? 'experimental',
+              progress: ((live?.spo2Confidence ?? 0) / 100).clamp(0.0, 1.0),
+              color: _amber,
+            ),
           ],
         ),
         const SizedBox(height: 18),
@@ -240,7 +257,21 @@ class TodayView extends StatelessWidget {
               label: 'HR',
               value: live?.heartRateBpm == null
                   ? 'Not computed'
-                  : '${live!.heartRateBpm!.toStringAsFixed(1)} bpm',
+                  : '${live!.heartRateBpm!.toStringAsFixed(1)} bpm · ${live.hrConfidenceLabel}',
+            ),
+            _StripItem(
+              icon: Icons.timeline_rounded,
+              label: 'HRV',
+              value: hrv?.available == true
+                  ? 'RMSSD ${hrv!.rmssdMs!.toStringAsFixed(0)} ms · ${hrv.confidence}%'
+                  : hrv?.status ?? 'Needs clean IBI',
+            ),
+            _StripItem(
+              icon: Icons.water_drop_rounded,
+              label: 'SpO2',
+              value: live?.spo2Percent == null
+                  ? 'Experimental warmup'
+                  : '${live!.spo2Percent}% · ${live.spo2ConfidenceLabel}',
             ),
             _StripItem(
               icon: Icons.memory_rounded,
@@ -276,6 +307,10 @@ class TodayView extends StatelessWidget {
               _FactRow(
                 'Backfill requests',
                 summary?.controlWrites.toString() ?? 'Waiting',
+              ),
+              _FactRow(
+                'Metric calibration',
+                '${live?.calibrationProgress ?? 0}% optical · ${hrv?.calibrationProgress ?? 0}% HRV baseline',
               ),
             ],
           ),
@@ -381,6 +416,7 @@ class LiveView extends StatelessWidget {
     final live = controller.latestLiveRecord;
     final raw = controller.latestRawPpgFrame;
     final rawEnabled = controller.rawPpgDiagnosticEnabled;
+    final hrv = controller.latestHrvSummary;
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
@@ -484,6 +520,23 @@ class LiveView extends StatelessWidget {
               label: 'Pedometer',
               value: live?.motionLabel ?? 'Waiting',
             ),
+            _StripItem(
+              icon: Icons.favorite_rounded,
+              label: 'HR certainty',
+              value: live?.hrConfidenceLabel ?? 'Warming up',
+            ),
+            _StripItem(
+              icon: Icons.water_drop_rounded,
+              label: 'SpO2 certainty',
+              value: live?.spo2ConfidenceLabel ?? 'Experimental',
+            ),
+            _StripItem(
+              icon: Icons.timeline_rounded,
+              label: 'HRV RMSSD',
+              value: hrv?.available == true
+                  ? '${hrv!.rmssdMs!.toStringAsFixed(0)} ms'
+                  : hrv?.status ?? 'Needs IBI',
+            ),
           ],
         ),
         const SizedBox(height: 18),
@@ -509,6 +562,28 @@ class LiveView extends StatelessWidget {
                     : raw.payloadLength > 0
                     ? '${raw.payloadLength} bytes'
                     : raw.sensorLabel,
+              ),
+              _FactRow(
+                'HR',
+                live?.heartRateBpm == null
+                    ? 'Waiting'
+                    : '${live!.heartRateBpm!.toStringAsFixed(1)} bpm (${live.hrConfidenceLabel})',
+              ),
+              _FactRow(
+                'IBI',
+                live?.ibiMs == null ? 'Waiting' : '${live!.ibiMs} ms',
+              ),
+              _FactRow(
+                'SpO2',
+                live?.spo2Percent == null
+                    ? 'Waiting'
+                    : '${live!.spo2Percent}% (${live.spo2ConfidenceLabel})',
+              ),
+              _FactRow(
+                'HRV',
+                hrv?.available == true
+                    ? 'RMSSD ${hrv!.rmssdMs!.toStringAsFixed(0)} ms, SDNN ${hrv.sdnnMs!.toStringAsFixed(0)} ms (${hrv.confidence}%)'
+                    : hrv?.status ?? 'Needs clean IBI',
               ),
               const SizedBox(height: 12),
               _HexBox(text: _hexPreview(controller.latestLiveFrameHex)),
@@ -579,23 +654,28 @@ class HistoryView extends StatelessWidget {
           ),
         ),
         const SizedBox(height: 18),
-        _SectionTitle('Not computed yet'),
+        _SectionTitle('Calibration'),
         _MetricStrip(
-          items: const [
-            _StripItem(
-              icon: Icons.bedtime_rounded,
-              label: 'Sleep',
-              value: 'Needs overnight data',
-            ),
+          items: [
             _StripItem(
               icon: Icons.favorite_rounded,
-              label: 'Recovery',
-              value: 'Needs HR/IBI',
+              label: 'HR',
+              value:
+                  controller.latestLiveRecord?.hrConfidenceLabel ??
+                  'Needs 15-30s signal',
             ),
             _StripItem(
-              icon: Icons.speed_rounded,
-              label: 'Strain',
-              value: 'Needs validated HR',
+              icon: Icons.timeline_rounded,
+              label: 'HRV',
+              value:
+                  '${controller.latestHrvSummary?.calibrationProgress ?? 0}% baseline',
+            ),
+            _StripItem(
+              icon: Icons.water_drop_rounded,
+              label: 'SpO2',
+              value:
+                  controller.latestLiveRecord?.spo2ConfidenceLabel ??
+                  'Experimental',
             ),
           ],
         ),

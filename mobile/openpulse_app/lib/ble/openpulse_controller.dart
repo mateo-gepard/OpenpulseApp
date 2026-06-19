@@ -34,11 +34,12 @@ class OpenPulseController extends ChangeNotifier {
   List<int> recentRawPpgSamples = const [];
   DateTime selectedDay = DateTime.now();
   DaySummary? selectedDaySummary;
+  HrvSummary? latestHrvSummary;
   DeviceMode selectedMode = DeviceMode.active;
-  int samplingHz = 25;
-  int ledGreenMa = 8;
-  int ledRedMa = 4;
-  int ledIrMa = 4;
+  int samplingHz = 64;
+  int ledGreenMa = 12;
+  int ledRedMa = 8;
+  int ledIrMa = 8;
   int stepGoal = 10000;
   bool rawPpgDiagnosticEnabled = false;
   bool storageReady = false;
@@ -102,6 +103,7 @@ class OpenPulseController extends ChangeNotifier {
       await storage.open();
       storageReady = true;
       _refreshSelectedDay();
+      _refreshHrvSummary();
       try {
         await notifications.initialize();
         notificationsReady = notifications.ready;
@@ -247,6 +249,7 @@ class OpenPulseController extends ChangeNotifier {
       selectedDay.day - 1,
     );
     _refreshSelectedDay();
+    _refreshHrvSummary();
     notifyListeners();
   }
 
@@ -738,6 +741,7 @@ class OpenPulseController extends ChangeNotifier {
       ...parsed.records,
     ].takeLast(90).toList(growable: false);
     _refreshSelectedDay();
+    _refreshHrvSummary();
     final steps = latestLiveRecord?.stepCount;
     if (steps != null) {
       if (steps < stepGoal) {
@@ -867,6 +871,13 @@ class OpenPulseController extends ChangeNotifier {
       return;
     }
     selectedDaySummary = storage.fetchDaySummary(selectedDay);
+  }
+
+  void _refreshHrvSummary() {
+    if (!storageReady) {
+      return;
+    }
+    latestHrvSummary = storage.fetchHrvSummary();
   }
 
   void _notifyStepGoalIfNeeded(int steps) {

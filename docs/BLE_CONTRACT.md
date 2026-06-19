@@ -86,10 +86,14 @@ Live record:
 | `uint8` | quality flags |
 | `uint32` | step count from onboard IMU, optional activity extension |
 | `uint8` | motion status, optional activity extension |
+| `uint8` | HR confidence 0-100, optional metrics extension |
+| `uint8` | SpO2 confidence 0-100, optional metrics extension |
+| `uint8` | optical calibration progress 0-100, optional metrics extension |
 
-Firmware built after the activity extension sends 17-byte live records. The
-first 12 bytes remain the original live record. Apps should accept both the
-legacy 12-byte record and the extended 17-byte record.
+Firmware built after the activity extension sends 17-byte live records.
+Firmware built after the metrics extension sends 20-byte live records. The
+first 12 bytes remain the original live record. Apps should accept legacy
+12-byte, activity 17-byte, and metrics 20-byte records.
 
 Motion status:
 
@@ -107,6 +111,8 @@ Quality flags:
 | 2 | low perfusion |
 | 3 | puck changed |
 | 4 | battery low |
+| 5 | PPG clipping/saturation |
+| 6 | metric still calibrating |
 
 ## Bulk Backfill Frame
 

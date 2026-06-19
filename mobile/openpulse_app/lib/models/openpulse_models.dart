@@ -100,6 +100,30 @@ class DaySummary {
   bool get hasData => liveRecords > 0 || rawPpgFrames > 0 || puckEvents > 0;
 }
 
+class HrvSummary {
+  const HrvSummary({
+    required this.rmssdMs,
+    required this.sdnnMs,
+    required this.cleanIbiCount,
+    required this.rejectedIbiCount,
+    required this.windowDuration,
+    required this.confidence,
+    required this.calibrationProgress,
+    required this.status,
+  });
+
+  final double? rmssdMs;
+  final double? sdnnMs;
+  final int cleanIbiCount;
+  final int rejectedIbiCount;
+  final Duration windowDuration;
+  final int confidence;
+  final int calibrationProgress;
+  final String status;
+
+  bool get available => rmssdMs != null && cleanIbiCount >= 8;
+}
+
 class PuckStatus {
   const PuckStatus({
     required this.receivedAt,
@@ -174,6 +198,9 @@ class LiveRecord {
     required this.qualityFlags,
     required this.stepCount,
     required this.motionStatus,
+    required this.hrConfidence,
+    required this.spo2Confidence,
+    required this.calibrationProgress,
   });
 
   final DateTime receivedAt;
@@ -187,13 +214,21 @@ class LiveRecord {
   final int qualityFlags;
   final int? stepCount;
   final int? motionStatus;
+  final int? hrConfidence;
+  final int? spo2Confidence;
+  final int? calibrationProgress;
 
   bool get hasSkinContact => qualityFlags & 0x01 != 0;
   bool get hasMotionArtifact => qualityFlags & 0x02 != 0;
   bool get hasLowPerfusion => qualityFlags & 0x04 != 0;
   bool get puckChanged => qualityFlags & 0x08 != 0;
   bool get batteryLow => qualityFlags & 0x10 != 0;
+  bool get hasPpgClipping => qualityFlags & 0x20 != 0;
+  bool get isUncalibrated => qualityFlags & 0x40 != 0;
   bool get motionAvailable => motionStatus == 0;
+
+  String get hrConfidenceLabel => _confidenceLabel(hrConfidence);
+  String get spo2ConfidenceLabel => _confidenceLabel(spo2Confidence);
 
   String get motionLabel {
     switch (motionStatus) {
@@ -218,10 +253,29 @@ class LiveRecord {
     if (hasLowPerfusion) {
       return 'Low perfusion';
     }
+    if (hasPpgClipping) {
+      return 'PPG clipping';
+    }
+    if (isUncalibrated) {
+      return 'Calibrating';
+    }
     if (hasSkinContact) {
       return 'Skin contact';
     }
     return 'No quality flag';
+  }
+
+  static String _confidenceLabel(int? confidence) {
+    if (confidence == null || confidence <= 0) {
+      return 'No confidence';
+    }
+    if (confidence >= 90) {
+      return '$confidence% high';
+    }
+    if (confidence >= 65) {
+      return '$confidence% medium';
+    }
+    return '$confidence% low';
   }
 }
 

@@ -1,3 +1,5 @@
+import 'dart:math' as math;
+
 import 'package:path/path.dart' as path;
 import 'package:path_provider/path_provider.dart';
 import 'package:sqlite3/sqlite3.dart';
@@ -82,6 +84,9 @@ class OpenPulseStorage {
         quality_flags INTEGER NOT NULL,
         step_count INTEGER,
         motion_status INTEGER,
+        hr_confidence INTEGER,
+        spo2_confidence INTEGER,
+        calibration_progress INTEGER,
         FOREIGN KEY(session_id) REFERENCES device_sessions(id)
       );
     ''');
@@ -95,6 +100,24 @@ class OpenPulseStorage {
       db,
       table: 'live_records',
       column: 'motion_status',
+      definition: 'INTEGER',
+    );
+    _addColumnIfMissing(
+      db,
+      table: 'live_records',
+      column: 'hr_confidence',
+      definition: 'INTEGER',
+    );
+    _addColumnIfMissing(
+      db,
+      table: 'live_records',
+      column: 'spo2_confidence',
+      definition: 'INTEGER',
+    );
+    _addColumnIfMissing(
+      db,
+      table: 'live_records',
+      column: 'calibration_progress',
       definition: 'INTEGER',
     );
     db.execute('''
@@ -269,8 +292,11 @@ class OpenPulseStorage {
         spo2_percent,
         quality_flags,
         step_count,
-        motion_status
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        motion_status,
+        hr_confidence,
+        spo2_confidence,
+        calibration_progress
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ''',
       [
         sessionId,
@@ -287,6 +313,9 @@ class OpenPulseStorage {
         record.qualityFlags,
         record.stepCount,
         record.motionStatus,
+        record.hrConfidence,
+        record.spo2Confidence,
+        record.calibrationProgress,
       ],
     );
   }
@@ -418,6 +447,135 @@ class OpenPulseStorage {
         'SELECT MAX(received_at_ms) FROM raw_ppg_frames WHERE received_at_ms >= ? AND received_at_ms < ?',
       ),
     );
+  }
+
+  HrvSummary fetchHrvSummary({Duration window = const Duration(minutes: 5)}) {
+    final db = _requireDb();
+    final nowMs = DateTime.now().millisecondsSinceEpoch;
+    final startMs = nowMs - window.inMilliseconds;
+    final rows = db.select(
+      '''
+      SELECT ibi_ms, hr_confidence, quality_flags, wall_time_ms
+      FROM live_records
+      WHERE wall_time_ms >= ?
+        AND ibi_ms IS NOT NULL
+      ORDER BY wall_time_ms ASC
+      ''',
+      [startMs],
+    );
+
+    final clean = <int>[];
+    var rejected = 0;
+    for (final row in rows) {
+      final ibi = row['ibi_ms'] as int;
+      final hrConfidence = row['hr_confidence'] as int?;
+      final quality = row['quality_flags'] as int? ?? 0;
+      final motionArtifact = quality & 0x02 != 0;
+      final lowPerfusion = quality & 0x04 != 0;
+      final clipping = quality & 0x20 != 0;
+      final trusted =
+          (hrConfidence ?? 0) >= 55 &&
+          !motionArtifact &&
+          !lowPerfusion &&
+          !clipping &&
+          ibi >= 333 &&
+          ibi <= 2000;
+      if (trusted) {
+        clean.add(ibi);
+      } else {
+        rejected++;
+      }
+    }
+
+    if (clean.length < 8) {
+      return HrvSummary(
+        rmssdMs: null,
+        sdnnMs: null,
+        cleanIbiCount: clean.length,
+        rejectedIbiCount: rejected,
+        windowDuration: window,
+        confidence: clean.isEmpty ? 0 : (clean.length * 4).clamp(0, 35),
+        calibrationProgress: (clean.length * 2).clamp(0, 25),
+        status: 'Needs clean IBI',
+      );
+    }
+
+    final filtered = <int>[];
+    for (final ibi in clean) {
+      if (filtered.isEmpty) {
+        filtered.add(ibi);
+        continue;
+      }
+      final previous = filtered.last;
+      final diff = (ibi - previous).abs();
+      if (diff > 350 || diff > previous * 0.28) {
+        rejected++;
+        continue;
+      }
+      filtered.add(ibi);
+    }
+
+    if (filtered.length < 8) {
+      return HrvSummary(
+        rmssdMs: null,
+        sdnnMs: null,
+        cleanIbiCount: filtered.length,
+        rejectedIbiCount: rejected,
+        windowDuration: window,
+        confidence: 20,
+        calibrationProgress: 20,
+        status: 'Artifact-heavy',
+      );
+    }
+
+    var diffSquares = 0.0;
+    for (var i = 1; i < filtered.length; i++) {
+      final diff = filtered[i] - filtered[i - 1];
+      diffSquares += diff * diff;
+    }
+    final rmssd = math.sqrt(diffSquares / (filtered.length - 1));
+    final mean = filtered.reduce((a, b) => a + b) / filtered.length;
+    final variance =
+        filtered.map((ibi) => math.pow(ibi - mean, 2)).reduce((a, b) => a + b) /
+        filtered.length;
+    final sdnn = math.sqrt(variance);
+    final coverage = (filtered.length / 300).clamp(0.0, 1.0);
+    final artifactRatio = rejected / (filtered.length + rejected);
+    final confidence = (45 + coverage * 45 - artifactRatio * 35).round().clamp(
+      0,
+      95,
+    );
+    final baselineDays = _countDaysWithCleanIbi(db);
+    final calibrationProgress = ((baselineDays / 14.0) * 100).round().clamp(
+      0,
+      100,
+    );
+
+    return HrvSummary(
+      rmssdMs: rmssd,
+      sdnnMs: sdnn,
+      cleanIbiCount: filtered.length,
+      rejectedIbiCount: rejected,
+      windowDuration: window,
+      confidence: confidence,
+      calibrationProgress: calibrationProgress,
+      status: calibrationProgress >= 100
+          ? 'Baseline ready'
+          : 'Baseline building',
+    );
+  }
+
+  int _countDaysWithCleanIbi(Database db) {
+    final rows = db.select('''
+      SELECT date(wall_time_ms / 1000, 'unixepoch') AS day, COUNT(*) AS count
+      FROM live_records
+      WHERE ibi_ms IS NOT NULL
+        AND COALESCE(hr_confidence, 0) >= 55
+        AND (quality_flags & 0x26) = 0
+      GROUP BY day
+      HAVING count >= 120
+    ''');
+    return rows.length;
   }
 
   Database _requireDb() {

@@ -128,4 +128,51 @@ void main() {
     expect(frame.records.single.motionLabel, 'OK');
     expect(frame.records.single.spo2Percent, isNull);
   });
+
+  test('parses live metrics confidence extension', () {
+    final frame = OpenPulseBleContract.parseLiveFrame(
+      bytes: [
+        0x10,
+        0x01,
+        0x08,
+        0x00,
+        0xe8,
+        0x03,
+        0x00,
+        0x00,
+        0x84,
+        0x02,
+        0xee,
+        0x02,
+        0xf4,
+        0x03,
+        0x62,
+        0x41,
+        0xd2,
+        0x04,
+        0x00,
+        0x00,
+        0x00,
+        0x58,
+        0x43,
+        0x39,
+      ],
+      previousDeviceUptimeMs: 5000,
+      syncedUnixMs: 100000,
+      syncedDeviceUptimeMs: 5000,
+      receivedAt: DateTime.fromMillisecondsSinceEpoch(2000),
+    );
+
+    final record = frame!.records.single;
+    expect(frame.sequence, 8);
+    expect(record.heartRateBpm, 64.4);
+    expect(record.ibiMs, 750);
+    expect(record.spo2Percent, 98);
+    expect(record.hasSkinContact, isTrue);
+    expect(record.isUncalibrated, isTrue);
+    expect(record.stepCount, 1234);
+    expect(record.hrConfidence, 88);
+    expect(record.spo2Confidence, 67);
+    expect(record.calibrationProgress, 57);
+  });
 }

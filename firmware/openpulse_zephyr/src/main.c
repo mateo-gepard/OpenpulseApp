@@ -65,9 +65,17 @@ LOG_MODULE_REGISTER(openpulse, LOG_LEVEL_INF);
 #define OP_RECORD_KIND_GAP_MARKER 4
 #define OP_LIVE_RECORD_BASE_LEN 12
 #define OP_LIVE_RECORD_ACTIVITY_LEN 17
+#define OP_LIVE_RECORD_METRICS_LEN 20
 #define OP_RAW_FRAME_HEADER_LEN 8
 #define OP_RAW_MAX_PAYLOAD_BYTES 180
 #define OP_RAW_SETTLE_MS 120
+#define OP_PPG_BUFFER_LEN 512
+#define OP_PPG_MIN_IBI_MS 333
+#define OP_PPG_MAX_IBI_MS 2000
+#define OP_PPG_HR_CALIBRATION_MS 120000
+#define OP_PPG_SPO2_CALIBRATION_MS 600000
+#define OP_PPG_POLL_MS 250
+#define OP_LIVE_NOTIFY_MS 1000
 
 #define OP_EVENT_ATTACHED 1
 #define OP_EVENT_REMOVED 2
@@ -82,9 +90,12 @@ LOG_MODULE_REGISTER(openpulse, LOG_LEVEL_INF);
 #define OP_MOTION_STATUS_PEDOMETER_UNAVAILABLE 2
 
 #define OP_QUALITY_SKIN_CONTACT BIT(0)
+#define OP_QUALITY_MOTION_ARTIFACT BIT(1)
 #define OP_QUALITY_LOW_PERFUSION BIT(2)
 #define OP_QUALITY_PUCK_CHANGED BIT(3)
 #define OP_QUALITY_BATTERY_LOW BIT(4)
+#define OP_QUALITY_PPG_CLIPPING BIT(5)
+#define OP_QUALITY_PPG_UNCALIBRATED BIT(6)
 #define OP_BATTERY_DIVIDER_NUM 3
 #define OP_BATTERY_DIVIDER_DEN 1
 
@@ -112,10 +123,10 @@ static enum op_mode current_mode = OP_MODE_STANDBY;
 static uint16_t live_sequence;
 static uint16_t bulk_sequence;
 static uint16_t raw_sequence;
-static uint16_t sampling_hz = 25;
-static uint8_t led_green_ma = 8;
-static uint8_t led_red_ma = 4;
-static uint8_t led_ir_ma = 4;
+static uint16_t sampling_hz = 64;
+static uint8_t led_green_ma = 12;
+static uint8_t led_red_ma = 8;
+static uint8_t led_ir_ma = 8;
 static bool maxm86161_configured;
 static uint16_t maxm86161_config_sampling_hz;
 static uint8_t maxm86161_config_led_green_ma;
@@ -134,6 +145,19 @@ static uint16_t lsm6dsl_last_step_counter;
 static uint8_t battery_level = 0xff;
 static bool battery_level_known;
 static bool battery_adc_ready;
+static uint32_t ppg_green_samples[OP_PPG_BUFFER_LEN];
+static uint32_t ppg_green_times_ms[OP_PPG_BUFFER_LEN];
+static uint16_t ppg_green_head;
+static uint16_t ppg_green_count;
+static uint32_t ppg_green_sample_index;
+static int64_t ppg_metrics_started_ms;
+static uint16_t latest_hr_x10;
+static uint16_t latest_ibi_ms;
+static uint8_t latest_spo2_percent = 0xff;
+static uint8_t latest_hr_confidence;
+static uint8_t latest_spo2_confidence;
+static uint8_t latest_metric_calibration;
+static int64_t last_live_notification_ms;
 static uint8_t last_puck_status[4] = {
 	OP_EVENT_REMOVED,
 	OP_PUCK_KIND_PPG,
@@ -255,9 +279,13 @@ static int notify_battery(void)
 
 static int start_advertising(void);
 static int notify_puck_status(void);
+static void update_puck_status(uint8_t sensor_status);
 static uint8_t probe_maxm86161(void);
 static uint8_t prepare_maxm86161(void);
 static void stop_maxm86161(void);
+static int read_maxm86161_fifo_payload(uint8_t *payload,
+				       uint8_t max_payload_len,
+				       uint8_t *payload_len);
 
 static ssize_t read_control(struct bt_conn *conn,
 			    const struct bt_gatt_attr *attr,
@@ -362,6 +390,7 @@ static ssize_t write_control(struct bt_conn *conn,
 		synced_device_uptime_ms = sys_get_le64(&payload[8]);
 		time_synced = true;
 		current_mode = OP_MODE_ACTIVE;
+		last_live_notification_ms = 0;
 		notify_control_ack(command, 0);
 		k_work_reschedule(&stream_work, K_NO_WAIT);
 		break;
@@ -453,7 +482,11 @@ static void live_ccc_changed(const struct bt_gatt_attr *attr, uint16_t value)
 	mark_app_activity();
 	live_notify_enabled = (value == BT_GATT_CCC_NOTIFY);
 	if (live_notify_enabled && time_synced) {
+		last_live_notification_ms = 0;
 		k_work_reschedule(&stream_work, K_NO_WAIT);
+	} else if (!live_notify_enabled) {
+		k_work_cancel_delayable(&stream_work);
+		stop_maxm86161();
 	}
 }
 
@@ -885,6 +918,355 @@ static void stop_maxm86161(void)
 	}
 	maxm86161_configured = false;
 #endif
+	ppg_metrics_started_ms = 0;
+	latest_hr_x10 = 0;
+	latest_ibi_ms = 0;
+	latest_spo2_percent = 0xff;
+	latest_hr_confidence = 0;
+	latest_spo2_confidence = 0;
+	latest_metric_calibration = 0;
+}
+
+static uint8_t confidence_ramp(int64_t started_ms, uint32_t target_ms)
+{
+	int64_t elapsed_ms;
+
+	if (started_ms <= 0) {
+		return 0;
+	}
+
+	elapsed_ms = k_uptime_get() - started_ms;
+	if (elapsed_ms <= 0) {
+		return 0;
+	}
+	if ((uint64_t)elapsed_ms >= target_ms) {
+		return 100;
+	}
+
+	return (uint8_t)(((uint64_t)elapsed_ms * 100U) / target_ms);
+}
+
+static uint8_t min_u8(uint8_t a, uint8_t b)
+{
+	return a < b ? a : b;
+}
+
+static void ppg_buffer_reset(void)
+{
+	ppg_green_head = 0;
+	ppg_green_count = 0;
+	ppg_green_sample_index = 0;
+}
+
+static void ppg_buffer_push(uint32_t sample)
+{
+	uint32_t timestamp_ms;
+
+	if (sampling_hz == 0) {
+		return;
+	}
+
+	timestamp_ms = (uint32_t)(((uint64_t)ppg_green_sample_index * 1000U) / sampling_hz);
+	ppg_green_samples[ppg_green_head] = sample;
+	ppg_green_times_ms[ppg_green_head] = timestamp_ms;
+	ppg_green_head = (ppg_green_head + 1U) % OP_PPG_BUFFER_LEN;
+	if (ppg_green_count < OP_PPG_BUFFER_LEN) {
+		ppg_green_count++;
+	}
+	ppg_green_sample_index++;
+}
+
+static uint16_t median_u16(uint16_t *values, uint8_t count)
+{
+	uint16_t tmp;
+
+	if (count == 0) {
+		return 0;
+	}
+
+	for (uint8_t i = 0; i + 1U < count; i++) {
+		for (uint8_t j = i + 1U; j < count; j++) {
+			if (values[j] < values[i]) {
+				tmp = values[i];
+				values[i] = values[j];
+				values[j] = tmp;
+			}
+		}
+	}
+
+	return values[count / 2U];
+}
+
+static void compute_hr_from_green(uint8_t *quality)
+{
+	uint32_t window_ms;
+	uint32_t newest_ms;
+	uint32_t min_sample = UINT32_MAX;
+	uint32_t max_sample = 0;
+	uint64_t sum = 0;
+	uint32_t mean;
+	uint32_t threshold;
+	uint32_t previous_peak_ms = 0;
+	uint32_t previous_value = 0;
+	uint32_t current_value;
+	uint32_t next_value;
+	uint16_t intervals[12];
+	uint16_t window_count = 0;
+	uint8_t interval_count = 0;
+	uint8_t peak_count = 0;
+	uint16_t confidence;
+
+	latest_hr_x10 = 0;
+	latest_ibi_ms = 0;
+	latest_hr_confidence = 0;
+
+	if (ppg_green_count < sampling_hz * 4U || sampling_hz == 0) {
+		*quality |= OP_QUALITY_LOW_PERFUSION | OP_QUALITY_PPG_UNCALIBRATED;
+		return;
+	}
+
+	newest_ms = ppg_green_times_ms[(ppg_green_head + OP_PPG_BUFFER_LEN - 1U) % OP_PPG_BUFFER_LEN];
+	window_ms = sampling_hz >= 64 ? 10000U : 12000U;
+
+	for (uint16_t n = 0; n < ppg_green_count; n++) {
+		uint16_t idx = (ppg_green_head + OP_PPG_BUFFER_LEN - ppg_green_count + n) % OP_PPG_BUFFER_LEN;
+		if (newest_ms - ppg_green_times_ms[idx] > window_ms) {
+			continue;
+		}
+		current_value = ppg_green_samples[idx];
+		if (current_value < min_sample) {
+			min_sample = current_value;
+		}
+		if (current_value > max_sample) {
+			max_sample = current_value;
+		}
+		sum += current_value;
+		window_count++;
+	}
+
+	if (window_count < sampling_hz * 4U || max_sample <= min_sample || sum == 0) {
+		*quality |= OP_QUALITY_LOW_PERFUSION;
+		return;
+	}
+
+	mean = (uint32_t)(sum / window_count);
+	if (max_sample - min_sample < 600U) {
+		*quality |= OP_QUALITY_LOW_PERFUSION;
+		return;
+	}
+	if (max_sample > 0x7a000U || min_sample < 200U) {
+		*quality |= OP_QUALITY_PPG_CLIPPING;
+	}
+
+	threshold = mean + ((max_sample - min_sample) * 28U) / 100U;
+
+	for (uint16_t n = 1; n + 1U < ppg_green_count; n++) {
+		uint16_t idx_prev = (ppg_green_head + OP_PPG_BUFFER_LEN - ppg_green_count + n - 1U) % OP_PPG_BUFFER_LEN;
+		uint16_t idx = (ppg_green_head + OP_PPG_BUFFER_LEN - ppg_green_count + n) % OP_PPG_BUFFER_LEN;
+		uint16_t idx_next = (ppg_green_head + OP_PPG_BUFFER_LEN - ppg_green_count + n + 1U) % OP_PPG_BUFFER_LEN;
+		uint32_t sample_ms = ppg_green_times_ms[idx];
+
+		if (newest_ms - sample_ms > window_ms) {
+			continue;
+		}
+
+		previous_value = ppg_green_samples[idx_prev];
+		current_value = ppg_green_samples[idx];
+		next_value = ppg_green_samples[idx_next];
+		if (current_value <= threshold ||
+		    current_value < previous_value ||
+		    current_value < next_value) {
+			continue;
+		}
+
+		if (previous_peak_ms > 0) {
+			uint32_t ibi = sample_ms - previous_peak_ms;
+			if (ibi >= OP_PPG_MIN_IBI_MS && ibi <= OP_PPG_MAX_IBI_MS) {
+				if (interval_count < (sizeof(intervals) / sizeof(intervals[0]))) {
+					intervals[interval_count++] = (uint16_t)ibi;
+				}
+				peak_count++;
+			}
+		} else {
+			peak_count++;
+		}
+		previous_peak_ms = sample_ms;
+	}
+
+	if (interval_count < 2) {
+		*quality |= OP_QUALITY_LOW_PERFUSION;
+		return;
+	}
+
+	latest_ibi_ms = median_u16(intervals, interval_count);
+	if (latest_ibi_ms == 0) {
+		*quality |= OP_QUALITY_LOW_PERFUSION;
+		return;
+	}
+
+	latest_hr_x10 = (uint16_t)((600000U + (latest_ibi_ms / 2U)) / latest_ibi_ms);
+	confidence = (uint16_t)confidence_ramp(ppg_metrics_started_ms, OP_PPG_HR_CALIBRATION_MS);
+	if (confidence > 90U) {
+		confidence = 90U;
+	}
+	confidence += interval_count * 3U;
+	if (confidence > 100U) {
+		confidence = 100U;
+	}
+	if (latest_accel_milli_g > 1250 || latest_accel_milli_g < 750) {
+		*quality |= OP_QUALITY_MOTION_ARTIFACT;
+		confidence = confidence > 30U ? confidence - 30U : 0U;
+	}
+
+	if (confidence < 45U) {
+		*quality |= OP_QUALITY_PPG_UNCALIBRATED;
+	}
+	*quality |= OP_QUALITY_SKIN_CONTACT;
+	latest_hr_confidence = (uint8_t)confidence;
+	ARG_UNUSED(peak_count);
+}
+
+static void compute_spo2_from_window(uint32_t red_min,
+				     uint32_t red_max,
+				     uint64_t red_sum,
+				     uint16_t red_count,
+				     uint32_t ir_min,
+				     uint32_t ir_max,
+				     uint64_t ir_sum,
+				     uint16_t ir_count,
+				     uint8_t *quality)
+{
+	uint32_t red_dc;
+	uint32_t ir_dc;
+	uint32_t red_ac;
+	uint32_t ir_ac;
+	uint32_t ratio_x1000;
+	int32_t spo2;
+	uint16_t confidence;
+
+	latest_spo2_percent = 0xff;
+	latest_spo2_confidence = 0;
+
+	if (red_count < 12U || ir_count < 12U || red_sum == 0 || ir_sum == 0) {
+		return;
+	}
+
+	red_dc = (uint32_t)(red_sum / red_count);
+	ir_dc = (uint32_t)(ir_sum / ir_count);
+	red_ac = red_max > red_min ? red_max - red_min : 0;
+	ir_ac = ir_max > ir_min ? ir_max - ir_min : 0;
+
+	if (red_dc == 0 || ir_dc == 0 || red_ac < 200U || ir_ac < 200U) {
+		*quality |= OP_QUALITY_LOW_PERFUSION;
+		return;
+	}
+
+	ratio_x1000 = (uint32_t)(((uint64_t)red_ac * ir_dc * 1000U) /
+				 ((uint64_t)ir_ac * red_dc));
+	spo2 = 110 - (int32_t)((25U * ratio_x1000 + 500U) / 1000U);
+	if (spo2 > 100) {
+		spo2 = 100;
+	}
+	if (spo2 < 70) {
+		spo2 = 70;
+	}
+
+	confidence = confidence_ramp(ppg_metrics_started_ms, OP_PPG_SPO2_CALIBRATION_MS);
+	if (confidence > 85U) {
+		confidence = 85U;
+	}
+	if (red_count > 32U && ir_count > 32U) {
+		confidence += 10U;
+	}
+	if (latest_accel_milli_g > 1150 || latest_accel_milli_g < 850) {
+		*quality |= OP_QUALITY_MOTION_ARTIFACT;
+		confidence = confidence > 25U ? confidence - 25U : 0U;
+	}
+	if (confidence > 95U) {
+		confidence = 95U;
+	}
+
+	latest_spo2_percent = (uint8_t)spo2;
+	latest_spo2_confidence = (uint8_t)confidence;
+	*quality |= OP_QUALITY_PPG_UNCALIBRATED;
+}
+
+static void update_optical_metrics(uint8_t *quality)
+{
+	uint8_t payload[OP_RAW_MAX_PAYLOAD_BYTES];
+	uint8_t payload_len = 0;
+	uint32_t red_min = UINT32_MAX;
+	uint32_t red_max = 0;
+	uint32_t ir_min = UINT32_MAX;
+	uint32_t ir_max = 0;
+	uint64_t red_sum = 0;
+	uint64_t ir_sum = 0;
+	uint16_t red_count = 0;
+	uint16_t ir_count = 0;
+	uint8_t sensor_status;
+
+	sensor_status = prepare_maxm86161();
+	update_puck_status(sensor_status);
+	if (sensor_status != OP_SENSOR_STATUS_OK) {
+		*quality |= OP_QUALITY_PUCK_CHANGED;
+		latest_hr_x10 = 0;
+		latest_ibi_ms = 0;
+		latest_spo2_percent = 0xff;
+		latest_hr_confidence = 0;
+		latest_spo2_confidence = 0;
+		latest_metric_calibration = 0;
+		return;
+	}
+
+	if (ppg_metrics_started_ms == 0) {
+		ppg_metrics_started_ms = k_uptime_get();
+		ppg_buffer_reset();
+	}
+
+	if (read_maxm86161_fifo_payload(payload, sizeof(payload), &payload_len)) {
+		*quality |= OP_QUALITY_LOW_PERFUSION;
+		return;
+	}
+
+	for (uint8_t i = 0; i + 2U < payload_len; i += MAXM86161_FIFO_ITEM_BYTES) {
+		uint8_t tag = payload[i] >> 3;
+		uint32_t sample = ((uint32_t)(payload[i] & 0x07U) << 16) |
+				  ((uint32_t)payload[i + 1U] << 8) |
+				  payload[i + 2U];
+
+		switch (tag) {
+		case 1:
+			ppg_buffer_push(sample);
+			break;
+		case 2:
+			if (sample < ir_min) {
+				ir_min = sample;
+			}
+			if (sample > ir_max) {
+				ir_max = sample;
+			}
+			ir_sum += sample;
+			ir_count++;
+			break;
+		case 3:
+			if (sample < red_min) {
+				red_min = sample;
+			}
+			if (sample > red_max) {
+				red_max = sample;
+			}
+			red_sum += sample;
+			red_count++;
+			break;
+		default:
+			break;
+		}
+	}
+
+	compute_hr_from_green(quality);
+	compute_spo2_from_window(red_min, red_max, red_sum, red_count,
+				 ir_min, ir_max, ir_sum, ir_count, quality);
+	latest_metric_calibration = min_u8(latest_hr_confidence, latest_spo2_confidence);
 }
 
 static int read_maxm86161_fifo_payload(uint8_t *payload,
@@ -1314,17 +1696,26 @@ static void advertising_work_handler(struct k_work *work)
 
 static void stream_work_handler(struct k_work *work)
 {
-	uint8_t frame[4 + OP_LIVE_RECORD_ACTIVITY_LEN];
+	uint8_t frame[4 + OP_LIVE_RECORD_METRICS_LEN];
 	uint8_t quality = 0;
+	int64_t now_ms;
 
 	if (!current_conn || !live_notify_enabled || !time_synced || current_mode == OP_MODE_SHIP) {
 		return;
 	}
 
+	now_ms = k_uptime_get();
 	sample_motion();
+	update_optical_metrics(&quality);
+
+	if (last_live_notification_ms > 0 &&
+	    now_ms - last_live_notification_ms < OP_LIVE_NOTIFY_MS) {
+		k_work_reschedule(&stream_work, K_MSEC(OP_PPG_POLL_MS));
+		return;
+	}
 
 	if (last_puck_status[2]) {
-		quality |= OP_QUALITY_LOW_PERFUSION;
+		quality |= OP_QUALITY_SKIN_CONTACT;
 	} else {
 		quality |= OP_QUALITY_PUCK_CHANGED;
 	}
@@ -1337,17 +1728,21 @@ static void stream_work_handler(struct k_work *work)
 	frame[1] = 1;
 	sys_put_le16(live_sequence++, &frame[2]);
 	sys_put_le32(1000, &frame[4]);
-	sys_put_le16(0, &frame[8]);
-	sys_put_le16(0, &frame[10]);
+	sys_put_le16(latest_hr_x10, &frame[8]);
+	sys_put_le16(latest_ibi_ms, &frame[10]);
 	sys_put_le16((uint16_t)latest_accel_milli_g, &frame[12]);
-	frame[14] = 0xff;
+	frame[14] = latest_spo2_percent;
 	frame[15] = quality;
 	sys_put_le32(step_count, &frame[16]);
 	frame[20] = motion_status;
+	frame[21] = latest_hr_confidence;
+	frame[22] = latest_spo2_confidence;
+	frame[23] = latest_metric_calibration;
 
 	(void)bt_gatt_notify(current_conn, &openpulse_svc.attrs[5], frame, sizeof(frame));
 
-	k_work_reschedule(&stream_work, K_SECONDS(1));
+	last_live_notification_ms = now_ms;
+	k_work_reschedule(&stream_work, K_MSEC(OP_PPG_POLL_MS));
 }
 
 static void connected(struct bt_conn *conn, uint8_t err)
