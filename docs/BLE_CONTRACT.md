@@ -137,13 +137,14 @@ Record kinds:
 ### Live Record Backfill Payload
 
 Record kind `5` carries repeated 24-byte records captured from the device's
-local RAM history. A kind `5` frame with `payload length = 0` marks restore
+local flash history. A kind `5` frame with `payload length = 0` marks restore
 complete. The app should treat these records as the device source of truth and
 replace overlapping phone-local live rows.
 
 | Offset | Type | Field |
 |---:|---|---|
-| 0 | `uint64` | absolute `device_uptime_ms` |
+| 0 | `uint32` | wall time seconds since Unix epoch, `0` if unavailable |
+| 4 | `uint32` | absolute `device_uptime_ms` within the current boot |
 | 8 | `uint16` | heart rate x10 bpm, `0` if unavailable |
 | 10 | `uint16` | IBI ms, `0` if unavailable |
 | 12 | `int16` | accel magnitude milli-g |

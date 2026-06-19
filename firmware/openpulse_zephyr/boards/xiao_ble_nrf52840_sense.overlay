@@ -22,3 +22,18 @@
 		battery-enable-gpios = <&gpio0 14 GPIO_ACTIVE_LOW>;
 	};
 };
+
+&flash0 {
+	partitions {
+		code_partition: partition@27000 {
+			reg = <0x00027000 0x0008d000>;
+		};
+
+		/delete-node/ partition@ec000;
+
+		storage_partition: partition@b4000 {
+			label = "Storage";
+			reg = <0x000b4000 0x00040000>;
+		};
+	};
+};

@@ -6,6 +6,7 @@
 #include <zephyr/drivers/sensor.h>
 #include <zephyr/kernel.h>
 #include <zephyr/logging/log.h>
+#include <zephyr/storage/flash_map.h>
 #include <zephyr/sys/byteorder.h>
 #include <zephyr/sys/reboot.h>
 #include <zephyr/bluetooth/bluetooth.h>
@@ -15,11 +16,12 @@
 #include <zephyr/bluetooth/uuid.h>
 #include <errno.h>
 #include <limits.h>
+#include <stddef.h>
 #include <string.h>
 
 LOG_MODULE_REGISTER(openpulse, LOG_LEVEL_INF);
 
-#define OPENPULSE_FW_VERSION "0.1.3-motion-backfill"
+#define OPENPULSE_FW_VERSION "0.1.4-flash-history"
 #define OPENPULSE_HW_VERSION "xiao_ble/nrf52840/sense"
 
 #define MAXM86161_I2C_ADDR 0x62
@@ -71,9 +73,11 @@ LOG_MODULE_REGISTER(openpulse, LOG_LEVEL_INF);
 #define OP_LIVE_RECORD_CALIBRATION_LEN 22
 #define OP_RAW_FRAME_HEADER_LEN 8
 #define OP_RAW_MAX_PAYLOAD_BYTES 180
-#define OP_HISTORY_RECORDS 900
 #define OP_BACKFILL_RECORDS_PER_FRAME 8
 #define OP_BACKFILL_NOTIFY_DELAY_MS 35
+#define OP_HISTORY_FLASH_RECORD_MAGIC 0x4f504852U
+#define OP_HISTORY_FLASH_RECORD_SIZE 32U
+#define OP_HISTORY_FLASH_SECTOR_SIZE 4096U
 #define OP_RAW_SETTLE_MS 120
 #define OP_PPG_BUFFER_LEN 4096
 #define OP_PPG_MIN_IBI_MS 333
@@ -194,6 +198,7 @@ struct optical_calibration_state {
 };
 
 struct op_history_record {
+	uint32_t wall_time_s;
 	uint64_t device_uptime_ms;
 	uint16_t hr_x10;
 	uint16_t ibi_ms;
@@ -206,6 +211,25 @@ struct op_history_record {
 	uint8_t spo2_confidence;
 	uint8_t calibration_progress;
 };
+
+struct op_history_flash_record {
+	uint32_t wall_time_s;
+	uint32_t device_uptime_ms;
+	uint32_t sequence;
+	uint16_t hr_x10;
+	uint16_t ibi_ms;
+	int16_t accel_milli_g;
+	uint8_t spo2_percent;
+	uint8_t quality_flags;
+	uint32_t step_count;
+	uint8_t motion_status;
+	uint8_t hr_confidence;
+	uint8_t spo2_confidence;
+	uint8_t calibration_progress;
+	uint32_t magic;
+} __packed;
+
+BUILD_ASSERT(sizeof(struct op_history_flash_record) == OP_HISTORY_FLASH_RECORD_SIZE);
 
 static struct bt_conn *current_conn;
 static bool control_notify_enabled;
@@ -266,11 +290,18 @@ static int64_t latest_spo2_valid_ms;
 static uint32_t spo2_ratio_filtered_x1000;
 static int64_t last_live_notification_ms;
 static int64_t optical_motion_hold_until_ms;
-static struct op_history_record history_records[OP_HISTORY_RECORDS];
-static uint16_t history_head;
-static uint16_t history_count;
+static bool clock_anchor_valid;
+static const struct flash_area *history_flash_area;
+static bool history_flash_ready;
+static uint32_t history_flash_total_slots;
+static uint32_t history_flash_slots_per_sector;
+static uint32_t history_oldest_sequence;
+static uint32_t history_newest_sequence;
+static uint32_t history_next_sequence;
+static bool history_has_records;
 static uint64_t backfill_from_uptime_ms;
-static uint16_t backfill_scan_index;
+static uint32_t backfill_next_sequence;
+static uint32_t backfill_last_sequence;
 static bool backfill_active;
 static uint8_t last_puck_status[4] = {
 	OP_EVENT_REMOVED,
@@ -431,32 +462,11 @@ static void notify_control_ack(uint8_t command, uint8_t status)
 	}
 }
 
-static const struct op_history_record *history_record_at(uint16_t chronological_index)
-{
-	uint16_t idx;
-
-	if (chronological_index >= history_count) {
-		return NULL;
-	}
-
-	idx = (history_head + OP_HISTORY_RECORDS - history_count +
-	       chronological_index) % OP_HISTORY_RECORDS;
-	return &history_records[idx];
-}
-
-static void history_push_record(const struct op_history_record *record)
-{
-	history_records[history_head] = *record;
-	history_head = (history_head + 1U) % OP_HISTORY_RECORDS;
-	if (history_count < OP_HISTORY_RECORDS) {
-		history_count++;
-	}
-}
-
 static void pack_backfill_live_record(uint8_t *dst,
 				      const struct op_history_record *record)
 {
-	sys_put_le64(record->device_uptime_ms, &dst[0]);
+	sys_put_le32(record->wall_time_s, &dst[0]);
+	sys_put_le32((uint32_t)record->device_uptime_ms, &dst[4]);
 	sys_put_le16(record->hr_x10, &dst[8]);
 	sys_put_le16(record->ibi_ms, &dst[10]);
 	sys_put_le16((uint16_t)record->accel_milli_g, &dst[12]);
@@ -492,10 +502,253 @@ static void send_live_backfill_frame(const uint8_t *payload,
 	}
 }
 
+static uint32_t history_flash_offset_for_sequence(uint32_t sequence)
+{
+	return (sequence % history_flash_total_slots) *
+	       OP_HISTORY_FLASH_RECORD_SIZE;
+}
+
+static uint32_t history_flash_sector_offset_for_sequence(uint32_t sequence)
+{
+	uint32_t slot = sequence % history_flash_total_slots;
+
+	return (slot / history_flash_slots_per_sector) *
+	       OP_HISTORY_FLASH_SECTOR_SIZE;
+}
+
+static bool history_flash_record_to_live(const struct op_history_flash_record *src,
+					 struct op_history_record *dst)
+{
+	if (src->magic != OP_HISTORY_FLASH_RECORD_MAGIC) {
+		return false;
+	}
+
+	dst->wall_time_s = src->wall_time_s;
+	dst->device_uptime_ms = src->device_uptime_ms;
+	dst->hr_x10 = src->hr_x10;
+	dst->ibi_ms = src->ibi_ms;
+	dst->accel_milli_g = src->accel_milli_g;
+	dst->spo2_percent = src->spo2_percent;
+	dst->quality_flags = src->quality_flags;
+	dst->step_count = src->step_count;
+	dst->motion_status = src->motion_status;
+	dst->hr_confidence = src->hr_confidence;
+	dst->spo2_confidence = src->spo2_confidence;
+	dst->calibration_progress = src->calibration_progress;
+	return true;
+}
+
+static bool history_flash_read_sequence(uint32_t sequence,
+					struct op_history_record *record)
+{
+	struct op_history_flash_record flash_record;
+	uint32_t offset;
+
+	if (!history_flash_ready || history_flash_total_slots == 0) {
+		return false;
+	}
+
+	offset = history_flash_offset_for_sequence(sequence);
+	if (flash_area_read(history_flash_area, offset, &flash_record,
+			    sizeof(flash_record))) {
+		return false;
+	}
+	if (flash_record.sequence != sequence) {
+		return false;
+	}
+
+	return history_flash_record_to_live(&flash_record, record);
+}
+
+static bool history_flash_slot_erased(uint32_t sequence)
+{
+	uint32_t magic = 0;
+	uint32_t offset;
+
+	if (!history_flash_ready || history_flash_total_slots == 0) {
+		return false;
+	}
+
+	offset = history_flash_offset_for_sequence(sequence) +
+		 offsetof(struct op_history_flash_record, magic);
+	if (flash_area_read(history_flash_area, offset, &magic, sizeof(magic))) {
+		return false;
+	}
+
+	return magic == UINT32_MAX;
+}
+
+static void history_flash_advance_to_next_sector(void)
+{
+	uint32_t slot = history_next_sequence % history_flash_total_slots;
+	uint32_t slots_to_advance = history_flash_slots_per_sector -
+				    (slot % history_flash_slots_per_sector);
+
+	history_next_sequence += slots_to_advance;
+}
+
+static int history_flash_prepare_write_slot(void)
+{
+	uint32_t slot = history_next_sequence % history_flash_total_slots;
+	uint32_t sector_offset;
+	int err;
+
+	if (slot % history_flash_slots_per_sector != 0 &&
+	    !history_flash_slot_erased(history_next_sequence)) {
+		history_flash_advance_to_next_sector();
+		slot = history_next_sequence % history_flash_total_slots;
+	}
+
+	if (slot % history_flash_slots_per_sector == 0) {
+		sector_offset = history_flash_sector_offset_for_sequence(
+			history_next_sequence);
+		err = flash_area_erase(history_flash_area, sector_offset,
+				       OP_HISTORY_FLASH_SECTOR_SIZE);
+		if (err) {
+			LOG_WRN("History flash erase failed: %d", err);
+			return err;
+		}
+		if (history_has_records &&
+		    history_next_sequence >= history_flash_total_slots) {
+			uint32_t erased_end = history_next_sequence -
+					      history_flash_total_slots +
+					      history_flash_slots_per_sector;
+			if (history_oldest_sequence < erased_end) {
+				history_oldest_sequence = erased_end;
+			}
+		}
+	}
+
+	return 0;
+}
+
+static void history_flash_store_record(const struct op_history_record *record)
+{
+	struct op_history_flash_record flash_record = {
+		.wall_time_s = record->wall_time_s,
+		.device_uptime_ms = (uint32_t)record->device_uptime_ms,
+		.hr_x10 = record->hr_x10,
+		.ibi_ms = record->ibi_ms,
+		.accel_milli_g = record->accel_milli_g,
+		.spo2_percent = record->spo2_percent,
+		.quality_flags = record->quality_flags,
+		.step_count = record->step_count,
+		.motion_status = record->motion_status,
+		.hr_confidence = record->hr_confidence,
+		.spo2_confidence = record->spo2_confidence,
+		.calibration_progress = record->calibration_progress,
+		.magic = OP_HISTORY_FLASH_RECORD_MAGIC,
+	};
+	uint32_t offset;
+	uint32_t magic = OP_HISTORY_FLASH_RECORD_MAGIC;
+	int err;
+
+	if (!history_flash_ready) {
+		return;
+	}
+
+	if (history_flash_prepare_write_slot()) {
+		return;
+	}
+
+	flash_record.sequence = history_next_sequence;
+	offset = history_flash_offset_for_sequence(history_next_sequence);
+	err = flash_area_write(history_flash_area, offset, &flash_record,
+			       offsetof(struct op_history_flash_record, magic));
+	if (!err) {
+		err = flash_area_write(history_flash_area,
+				       offset + offsetof(struct op_history_flash_record, magic),
+				       &magic, sizeof(magic));
+	}
+	if (err) {
+		LOG_WRN("History flash write failed: %d", err);
+		return;
+	}
+
+	if (!history_has_records) {
+		history_oldest_sequence = history_next_sequence;
+		history_has_records = true;
+	}
+	history_newest_sequence = history_next_sequence;
+	if (history_newest_sequence - history_oldest_sequence + 1U >
+	    history_flash_total_slots) {
+		history_oldest_sequence =
+			history_newest_sequence - history_flash_total_slots + 1U;
+	}
+	history_next_sequence++;
+}
+
+static void history_flash_init(void)
+{
+	struct op_history_flash_record record;
+	uint32_t valid_count = 0;
+	int err;
+
+	err = flash_area_open(FIXED_PARTITION_ID(storage_partition),
+			      &history_flash_area);
+	if (err) {
+		LOG_WRN("History flash open failed: %d", err);
+		return;
+	}
+	if (!flash_area_device_is_ready(history_flash_area)) {
+		LOG_WRN("History flash device is not ready");
+		return;
+	}
+	if (history_flash_area->fa_size < OP_HISTORY_FLASH_RECORD_SIZE ||
+	    history_flash_area->fa_size % OP_HISTORY_FLASH_SECTOR_SIZE != 0) {
+		LOG_WRN("History flash partition has unusable size: %u",
+			(uint32_t)history_flash_area->fa_size);
+		return;
+	}
+
+	history_flash_total_slots = history_flash_area->fa_size /
+				    OP_HISTORY_FLASH_RECORD_SIZE;
+	history_flash_slots_per_sector = OP_HISTORY_FLASH_SECTOR_SIZE /
+					 OP_HISTORY_FLASH_RECORD_SIZE;
+	if (history_flash_total_slots == 0 || history_flash_slots_per_sector == 0) {
+		LOG_WRN("History flash partition is too small");
+		return;
+	}
+
+	history_flash_ready = true;
+	for (uint32_t slot = 0; slot < history_flash_total_slots; slot++) {
+		uint32_t offset = slot * OP_HISTORY_FLASH_RECORD_SIZE;
+
+		if (flash_area_read(history_flash_area, offset, &record,
+				    sizeof(record))) {
+			continue;
+		}
+		if (record.magic != OP_HISTORY_FLASH_RECORD_MAGIC) {
+			continue;
+		}
+
+		if (!history_has_records) {
+			history_oldest_sequence = record.sequence;
+			history_newest_sequence = record.sequence;
+			history_has_records = true;
+		} else {
+			if (record.sequence < history_oldest_sequence) {
+				history_oldest_sequence = record.sequence;
+			}
+			if (record.sequence > history_newest_sequence) {
+				history_newest_sequence = record.sequence;
+			}
+		}
+		valid_count++;
+	}
+
+	history_next_sequence = history_has_records ?
+				history_newest_sequence + 1U : 0U;
+	LOG_INF("History flash ready: %u slots, %u valid, about %u minutes at 1 Hz",
+		history_flash_total_slots, valid_count,
+		history_flash_total_slots / 60U);
+}
+
 static void start_device_backfill(uint64_t from_uptime_ms)
 {
 	backfill_from_uptime_ms = from_uptime_ms;
-	backfill_scan_index = 0;
+	backfill_next_sequence = history_oldest_sequence;
+	backfill_last_sequence = history_newest_sequence;
 	backfill_active = true;
 	k_work_reschedule(&backfill_work, K_NO_WAIT);
 }
@@ -560,6 +813,7 @@ static ssize_t write_control(struct bt_conn *conn,
 		synced_unix_ms = sys_get_le64(&payload[0]);
 		synced_device_uptime_ms = sys_get_le64(&payload[8]);
 		time_synced = true;
+		clock_anchor_valid = true;
 		current_mode = OP_MODE_ACTIVE;
 		last_live_notification_ms = 0;
 		notify_control_ack(command, 0);
@@ -2504,18 +2758,20 @@ static void backfill_work_handler(struct k_work *work)
 		return;
 	}
 
-	while (backfill_scan_index < history_count &&
+	while (history_has_records &&
+	       backfill_next_sequence <= backfill_last_sequence &&
 	       record_count < OP_BACKFILL_RECORDS_PER_FRAME) {
-		const struct op_history_record *record =
-			history_record_at(backfill_scan_index++);
-		if (record == NULL ||
-		    record->device_uptime_ms <= backfill_from_uptime_ms) {
+		struct op_history_record record;
+		uint32_t sequence = backfill_next_sequence++;
+
+		if (!history_flash_read_sequence(sequence, &record) ||
+		    record.device_uptime_ms <= backfill_from_uptime_ms) {
 			continue;
 		}
 
 		pack_backfill_live_record(
 			&payload[record_count * OP_BACKFILL_LIVE_RECORD_LEN],
-			record);
+			&record);
 		record_count++;
 	}
 
@@ -2527,7 +2783,7 @@ static void backfill_work_handler(struct k_work *work)
 		return;
 	}
 
-	if (backfill_scan_index < history_count) {
+	if (history_has_records && backfill_next_sequence <= backfill_last_sequence) {
 		k_work_reschedule(&backfill_work,
 				  K_MSEC(OP_BACKFILL_NOTIFY_DELAY_MS));
 		return;
@@ -2544,6 +2800,7 @@ static void stream_work_handler(struct k_work *work)
 	uint8_t quality = 0;
 	int64_t now_ms;
 	uint32_t delta_ms = OP_LIVE_NOTIFY_MS;
+	uint64_t wall_time_ms = 0;
 	bool can_notify;
 
 	if (current_mode == OP_MODE_STANDBY || current_mode == OP_MODE_SHIP) {
@@ -2575,6 +2832,13 @@ static void stream_work_handler(struct k_work *work)
 		quality |= OP_QUALITY_BATTERY_LOW;
 	}
 
+	if (clock_anchor_valid) {
+		wall_time_ms = synced_unix_ms +
+			       ((uint64_t)now_ms - synced_device_uptime_ms);
+	}
+
+	record.wall_time_s = wall_time_ms > 0 ?
+			     (uint32_t)(wall_time_ms / 1000U) : 0U;
 	record.device_uptime_ms = (uint64_t)now_ms;
 	record.hr_x10 = latest_hr_x10;
 	record.ibi_ms = latest_ibi_ms;
@@ -2586,7 +2850,7 @@ static void stream_work_handler(struct k_work *work)
 	record.hr_confidence = latest_hr_confidence;
 	record.spo2_confidence = latest_spo2_confidence;
 	record.calibration_progress = latest_metric_calibration;
-	history_push_record(&record);
+	history_flash_store_record(&record);
 
 	can_notify = current_conn && live_notify_enabled && time_synced;
 	frame[0] = OP_FRAME_LIVE;
@@ -2707,6 +2971,7 @@ int main(void)
 #endif
 
 	configure_motion_sensor();
+	history_flash_init();
 	sample_motion();
 	read_battery();
 	update_puck_status(probe_maxm86161());

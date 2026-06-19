@@ -672,7 +672,7 @@ class HistoryView extends StatelessWidget {
               ),
               const SizedBox(height: 16),
               Text(
-                'On connect, OpenPulse sends its device-local RAM history and the phone replaces overlapping local rows with those device records. Board reboots still clear prototype history.',
+                'On connect, OpenPulse sends up to about 2 hours of device-local flash history and the phone replaces overlapping local rows with those device records.',
                 style: const TextStyle(color: _muted, height: 1.35),
               ),
             ],

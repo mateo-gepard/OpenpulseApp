@@ -167,7 +167,8 @@ class OpenPulseBleContract {
       offset + backfillLiveRecordLength <= frame.payloadBytes.length;
       offset += backfillLiveRecordLength
     ) {
-      final deviceUptime = data.getUint64(offset, Endian.little);
+      final wallTimeSeconds = data.getUint32(offset, Endian.little);
+      final deviceUptime = data.getUint32(offset + 4, Endian.little);
       final hrX10 = data.getUint16(offset + 8, Endian.little);
       final ibiMs = data.getUint16(offset + 10, Endian.little);
       final accel = data.getInt16(offset + 12, Endian.little);
@@ -178,7 +179,9 @@ class OpenPulseBleContract {
       final hrConfidence = data.getUint8(offset + 21);
       final spo2Confidence = data.getUint8(offset + 22);
       final calibrationProgress = data.getUint8(offset + 23);
-      final wallTimeMs = syncedUnixMs + (deviceUptime - syncedDeviceUptimeMs);
+      final wallTimeMs = wallTimeSeconds == 0
+          ? syncedUnixMs + (deviceUptime - syncedDeviceUptimeMs)
+          : wallTimeSeconds * 1000;
 
       records.add(
         LiveRecord(
