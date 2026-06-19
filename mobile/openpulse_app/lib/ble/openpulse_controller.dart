@@ -67,6 +67,7 @@ class OpenPulseController extends ChangeNotifier {
   final List<StreamSubscription<List<int>>> _valueSubscriptions = [];
   bool _intentionalDisconnect = false;
   bool _connectInFlight = false;
+  bool _gattSetupInFlight = false;
   int? _sessionId;
   int _lastDeviceUptimeMs = 0;
   int _syncedUnixMs = 0;
@@ -112,23 +113,32 @@ class OpenPulseController extends ChangeNotifier {
         notificationsReady = false;
         notificationPermissionGranted = false;
       }
+      await FlutterBluePlus.setOptions(
+        showPowerAlert: true,
+        restoreState: true,
+      );
       adapterState = FlutterBluePlus.adapterStateNow;
       _adapterSubscription = FlutterBluePlus.adapterState.listen((state) {
         adapterState = state;
         if (state == BluetoothAdapterState.on &&
             phase == ConnectionPhase.disconnected &&
             !_intentionalDisconnect) {
-          _scheduleScanRetry(Duration.zero);
+          unawaited(
+            _restoreExistingConnection().then((restored) {
+              if (!restored) {
+                _scheduleScanRetry(Duration.zero);
+              }
+            }),
+          );
         }
         notifyListeners();
       });
-      await FlutterBluePlus.setOptions(
-        showPowerAlert: true,
-        restoreState: true,
-      );
       notifyListeners();
       if (adapterState == BluetoothAdapterState.on) {
-        _scheduleScanRetry(Duration.zero);
+        final restored = await _restoreExistingConnection();
+        if (!restored) {
+          _scheduleScanRetry(Duration.zero);
+        }
       }
     } catch (error) {
       _setPhase(
@@ -399,17 +409,115 @@ class OpenPulseController extends ChangeNotifier {
     _device = device;
     _setPhase(ConnectionPhase.connecting, 'Connecting to OpenPulse.');
     try {
-      await _connectionSubscription?.cancel();
-      _connectionSubscription = device.connectionState.listen((state) {
-        if (state == BluetoothConnectionState.disconnected &&
-            !_intentionalDisconnect) {
-          _handleUnexpectedDisconnect();
-        }
-      });
+      await _listenToDeviceConnection(device);
 
       await device.connect(
         license: License.nonprofit,
         timeout: const Duration(seconds: 25),
+        mtu: null,
+        autoConnect: true,
+      );
+      await device.connectionState
+          .where((state) => state == BluetoothConnectionState.connected)
+          .first
+          .timeout(
+            const Duration(seconds: 25),
+            onTimeout: () => throw TimeoutException(
+              'OpenPulse auto-connect did not complete.',
+            ),
+          );
+      await _setupConnectedDevice(device);
+    } catch (error) {
+      _clearGatt();
+      _setPhase(ConnectionPhase.error, 'BLE connection failed: $error');
+      _scheduleScanRetry();
+    } finally {
+      _connectInFlight = false;
+    }
+  }
+
+  Future<void> _listenToDeviceConnection(BluetoothDevice device) async {
+    await _connectionSubscription?.cancel();
+    _connectionSubscription = device.connectionState.listen((state) {
+      if (state == BluetoothConnectionState.connected &&
+          !_intentionalDisconnect &&
+          !_connectInFlight &&
+          !_gattSetupInFlight &&
+          phase != ConnectionPhase.streaming) {
+        unawaited(_setupConnectedDevice(device, restored: true));
+      } else if (state == BluetoothConnectionState.disconnected &&
+          !_intentionalDisconnect &&
+          !_connectInFlight) {
+        _handleUnexpectedDisconnect();
+      }
+    });
+  }
+
+  Future<bool> _restoreExistingConnection() async {
+    if (_intentionalDisconnect ||
+        _connectInFlight ||
+        _gattSetupInFlight ||
+        phase == ConnectionPhase.streaming) {
+      return phase == ConnectionPhase.streaming;
+    }
+
+    final candidates = <String, BluetoothDevice>{};
+    for (final device in FlutterBluePlus.connectedDevices) {
+      candidates[device.remoteId.toString()] = device;
+    }
+    try {
+      final systemDevices = await FlutterBluePlus.systemDevices([
+        OpenPulseBleContract.serviceUuid,
+      ]);
+      for (final device in systemDevices) {
+        candidates[device.remoteId.toString()] = device;
+      }
+    } catch (_) {
+      // Some iOS restoration paths only expose app-connected devices.
+    }
+
+    for (final device in candidates.values) {
+      final likelyOpenPulse =
+          device.advName == OpenPulseBleContract.advertisedName ||
+          device.platformName == OpenPulseBleContract.advertisedName ||
+          candidates.length == 1;
+      if (!likelyOpenPulse) {
+        continue;
+      }
+      _intentionalDisconnect = false;
+      _device = device;
+      await _listenToDeviceConnection(device);
+      unawaited(
+        device
+            .connect(license: License.nonprofit, mtu: null, autoConnect: true)
+            .catchError((_) {}),
+      );
+      if (await device.connectionState.first ==
+          BluetoothConnectionState.connected) {
+        await _setupConnectedDevice(device, restored: true);
+        return true;
+      }
+    }
+
+    return false;
+  }
+
+  Future<void> _setupConnectedDevice(
+    BluetoothDevice device, {
+    bool restored = false,
+  }) async {
+    if (_gattSetupInFlight || _intentionalDisconnect) {
+      return;
+    }
+    _gattSetupInFlight = true;
+    _device = device;
+    try {
+      await FlutterBluePlus.stopScan();
+      _setPhase(
+        ConnectionPhase.discovering,
+        restored
+            ? 'OpenPulse reconnected. Restoring GATT.'
+            : 'Discovering OpenPulse GATT.',
       );
       try {
         await device.requestMtu(247);
@@ -417,7 +525,6 @@ class OpenPulseController extends ChangeNotifier {
         // iOS negotiates MTU internally; Android may honor this request.
       }
 
-      _setPhase(ConnectionPhase.discovering, 'Discovering OpenPulse GATT.');
       final services = await device.discoverServices();
       _bindServices(services);
       gattReady = true;
@@ -439,10 +546,10 @@ class OpenPulseController extends ChangeNotifier {
       _setPhase(ConnectionPhase.streaming, 'OpenPulse is connected and live.');
     } catch (error) {
       _clearGatt();
-      _setPhase(ConnectionPhase.error, 'BLE connection failed: $error');
+      _setPhase(ConnectionPhase.error, 'BLE restore failed: $error');
       _scheduleScanRetry();
     } finally {
-      _connectInFlight = false;
+      _gattSetupInFlight = false;
     }
   }
 
@@ -799,11 +906,19 @@ class OpenPulseController extends ChangeNotifier {
   }
 
   void _handleUnexpectedDisconnect() {
+    final device = _device;
     unawaited(notifications.connectionDropped());
     storage.closeSession(_sessionId);
     _clearGatt(closeSession: false);
     _setPhase(ConnectionPhase.reconnecting, 'BLE link lost. Reconnecting.');
-    _scheduleScanRetry(const Duration(seconds: 2));
+    if (device != null) {
+      unawaited(
+        device
+            .connect(license: License.nonprofit, mtu: null, autoConnect: true)
+            .catchError((_) {}),
+      );
+    }
+    _scheduleScanRetry(const Duration(seconds: 20));
   }
 
   void _scheduleScanRetry([Duration delay = const Duration(seconds: 3)]) {
