@@ -250,6 +250,8 @@ class TodayView extends StatelessWidget {
           ],
         ),
         const SizedBox(height: 18),
+        _CalibrationPanel(live: live, hrv: hrv, compact: true),
+        const SizedBox(height: 18),
         _MetricStrip(
           items: [
             _StripItem(
@@ -310,7 +312,7 @@ class TodayView extends StatelessWidget {
               ),
               _FactRow(
                 'Metric calibration',
-                '${live?.calibrationProgress ?? 0}% optical · ${hrv?.calibrationProgress ?? 0}% HRV baseline',
+                '${_percent(live?.calibrationProgress)} optical · ${_percent(hrv?.calibrationProgress)} HRV baseline',
               ),
             ],
           ),
@@ -539,6 +541,8 @@ class LiveView extends StatelessWidget {
             ),
           ],
         ),
+        const SizedBox(height: 18),
+        _CalibrationPanel(live: live, hrv: hrv, compact: false),
         const SizedBox(height: 18),
         _Surface(
           child: Column(
@@ -1015,6 +1019,197 @@ class _MetricRing extends StatelessWidget {
             maxLines: 1,
             overflow: TextOverflow.ellipsis,
             style: const TextStyle(color: _muted, fontSize: 12),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _CalibrationPanel extends StatelessWidget {
+  const _CalibrationPanel({
+    required this.live,
+    required this.hrv,
+    required this.compact,
+  });
+
+  final LiveRecord? live;
+  final HrvSummary? hrv;
+  final bool compact;
+
+  @override
+  Widget build(BuildContext context) {
+    final opticalProgress = _normalizedPercent(live?.calibrationProgress);
+    final hrProgress = _normalizedPercent(live?.hrConfidence);
+    final spo2Progress = _normalizedPercent(live?.spo2Confidence);
+    final hrvProgress = _normalizedPercent(hrv?.calibrationProgress);
+    final opticalPercent = _percent(live?.calibrationProgress);
+    final hrvPercent = _percent(hrv?.calibrationProgress);
+
+    return _Surface(
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Container(
+                width: 44,
+                height: 44,
+                decoration: const BoxDecoration(
+                  shape: BoxShape.circle,
+                  color: _surface2,
+                ),
+                child: const Icon(Icons.auto_graph_rounded, color: _mint),
+              ),
+              const SizedBox(width: 14),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      'Calibration',
+                      style: const TextStyle(
+                        fontSize: 20,
+                        fontWeight: FontWeight.w900,
+                      ),
+                    ),
+                    const SizedBox(height: 4),
+                    Text(
+                      _calibrationPhase(live?.calibrationProgress),
+                      style: const TextStyle(color: _muted, height: 1.25),
+                    ),
+                  ],
+                ),
+              ),
+              Text(
+                opticalPercent,
+                style: const TextStyle(
+                  fontSize: 26,
+                  fontWeight: FontWeight.w900,
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 18),
+          _ProgressLine(
+            value: opticalProgress,
+            color: _mint,
+            label: 'Optical profile',
+            trailing:
+                '$opticalPercent · ${_calibrationShortLabel(live?.calibrationProgress)}',
+          ),
+          const SizedBox(height: 12),
+          _ProgressLine(
+            value: hrProgress,
+            color: _red,
+            label: 'HR confidence',
+            trailing: live?.hrConfidenceLabel ?? 'waiting',
+          ),
+          const SizedBox(height: 12),
+          _ProgressLine(
+            value: spo2Progress,
+            color: _amber,
+            label: 'SpO2 confidence',
+            trailing: live?.spo2ConfidenceLabel ?? 'waiting',
+          ),
+          if (!compact) ...[
+            const SizedBox(height: 12),
+            _ProgressLine(
+              value: hrvProgress,
+              color: _blue,
+              label: 'HRV baseline',
+              trailing: '$hrvPercent · ${hrv?.status ?? 'needs IBI'}',
+            ),
+            const SizedBox(height: 14),
+            _CalibrationLegend(
+              opticalProgress: live?.calibrationProgress,
+              hrvProgress: hrv?.calibrationProgress,
+            ),
+          ],
+        ],
+      ),
+    );
+  }
+}
+
+class _CalibrationLegend extends StatelessWidget {
+  const _CalibrationLegend({
+    required this.opticalProgress,
+    required this.hrvProgress,
+  });
+
+  final int? opticalProgress;
+  final int? hrvProgress;
+
+  @override
+  Widget build(BuildContext context) {
+    return Wrap(
+      spacing: 10,
+      runSpacing: 10,
+      children: [
+        _CalibrationChip(
+          icon: Icons.timer_rounded,
+          label: opticalProgress == null
+              ? 'Waiting for live stream'
+              : '2 min warmup, then hourly learning',
+          color: _mint,
+        ),
+        _CalibrationChip(
+          icon: Icons.update_rounded,
+          label: opticalProgress == null
+              ? 'No optical profile yet'
+              : '${_percent(opticalProgress)} optical profile',
+          color: _amber,
+        ),
+        _CalibrationChip(
+          icon: Icons.timeline_rounded,
+          label: '${_percent(hrvProgress)} HRV baseline',
+          color: _blue,
+        ),
+      ],
+    );
+  }
+}
+
+class _CalibrationChip extends StatelessWidget {
+  const _CalibrationChip({
+    required this.icon,
+    required this.label,
+    required this.color,
+  });
+
+  final IconData icon;
+  final String label;
+  final Color color;
+
+  @override
+  Widget build(BuildContext context) {
+    final maxWidth = math.max(120.0, MediaQuery.sizeOf(context).width - 64);
+    return Container(
+      constraints: BoxConstraints(maxWidth: maxWidth),
+      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+      decoration: BoxDecoration(
+        color: _surface2,
+        borderRadius: BorderRadius.circular(18),
+        border: Border.all(color: _line),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Icon(icon, size: 16, color: color),
+          const SizedBox(width: 6),
+          Flexible(
+            child: Text(
+              label,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: const TextStyle(
+                color: _text,
+                fontSize: 12,
+                fontWeight: FontWeight.w800,
+              ),
+            ),
           ),
         ],
       ),
@@ -1530,6 +1725,40 @@ String _timeAgo(DateTime date) {
     return '${diff.inMinutes}m ago';
   }
   return _clock(date);
+}
+
+double _normalizedPercent(int? value) {
+  return ((value ?? 0) / 100).clamp(0.0, 1.0).toDouble();
+}
+
+String _percent(int? value) {
+  return '${(value ?? 0).clamp(0, 100)}%';
+}
+
+String _calibrationShortLabel(int? value) {
+  if (value == null || value <= 0) {
+    return 'waiting';
+  }
+  if (value < 30) {
+    return 'warmup';
+  }
+  if (value < 100) {
+    return 'hourly learning';
+  }
+  return 'profile ready';
+}
+
+String _calibrationPhase(int? value) {
+  if (value == null || value <= 0) {
+    return 'Connect and start live data to begin optical calibration.';
+  }
+  if (value < 30) {
+    return 'Initial optical warmup is learning the signal baseline.';
+  }
+  if (value < 100) {
+    return 'Hourly calibration is refining spike rejection and red/IR baselines.';
+  }
+  return 'Optical profile is fully calibrated for the current hardware path.';
 }
 
 String _hexPreview(String? hex) {
