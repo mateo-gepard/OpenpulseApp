@@ -1365,7 +1365,7 @@ class _CalibrationPanelState extends State<_CalibrationPanel> {
             if (_expanded) ...[
               const SizedBox(height: 18),
               SizedBox(
-                height: 224,
+                height: 360,
                 child: _CalibrationTimelinePlot(timeline: widget.timeline),
               ),
               const SizedBox(height: 12),
@@ -1399,15 +1399,6 @@ class _CalibrationTimelinePainter extends CustomPainter {
 
   @override
   void paint(Canvas canvas, Size size) {
-    final plot = Offset.zero & size;
-    final gridPaint = Paint()
-      ..color = _line
-      ..strokeWidth = 1;
-    for (var i = 1; i < 4; i++) {
-      final y = plot.top + plot.height * i / 4;
-      canvas.drawLine(Offset(plot.left, y), Offset(plot.right, y), gridPaint);
-    }
-
     final points = timeline?.points ?? const <CalibrationTimelinePoint>[];
     if (points.length < 2) {
       _paintCenteredLabel(canvas, size, 'Waiting for calibration samples');
@@ -1417,123 +1408,244 @@ class _CalibrationTimelinePainter extends CustomPainter {
     final start = points.first.time.millisecondsSinceEpoch;
     final end = points.last.time.millisecondsSinceEpoch;
     final spanMs = math.max(1, end - start);
+    final plot = Rect.fromLTWH(
+      58,
+      10,
+      math.max(20, size.width - 86),
+      math.max(20, size.height - 40),
+    );
+    final hrvUpper = _hrvUpperBound(points);
+    final lanes = [
+      _CalibrationLane(
+        label: 'HR',
+        unit: 'bpm',
+        min: 40,
+        max: 190,
+        color: _red,
+        valueFor: (point) => point.heartRateBpm,
+        format: (value) => value.toStringAsFixed(0),
+      ),
+      _CalibrationLane(
+        label: 'SpO2',
+        unit: '%',
+        min: 70,
+        max: 100,
+        color: _amber,
+        valueFor: (point) => point.spo2Percent?.toDouble(),
+        format: (value) => value.toStringAsFixed(0),
+      ),
+      _CalibrationLane(
+        label: 'HRV',
+        unit: 'ms',
+        min: 0,
+        max: hrvUpper,
+        color: _blue,
+        valueFor: (point) => point.hrvRmssdMs,
+        format: (value) => value.toStringAsFixed(0),
+      ),
+      _CalibrationLane(
+        label: 'Profile',
+        unit: '%',
+        min: 0,
+        max: 100,
+        color: _mint,
+        valueFor: (point) => point.calibrationProgress?.toDouble(),
+        format: (value) => value.toStringAsFixed(0),
+      ),
+    ];
+    const laneGap = 12.0;
+    final laneHeight =
+        (plot.height - laneGap * (lanes.length - 1)) / lanes.length;
 
     double xFor(DateTime time) {
       final offset = time.millisecondsSinceEpoch - start;
       return plot.left + (offset / spanMs) * plot.width;
     }
 
-    final hrValues = [for (final point in points) point.heartRateBpm];
-    final spo2Values = [
-      for (final point in points) point.spo2Percent?.toDouble(),
-    ];
-    final hrvValues = [for (final point in points) point.hrvRmssdMs];
-
-    _drawSeries(
-      canvas: canvas,
-      plot: plot,
-      points: points,
-      values: hrValues,
-      color: _red,
-      xFor: xFor,
-    );
-    _drawSeries(
-      canvas: canvas,
-      plot: plot,
-      points: points,
-      values: spo2Values,
-      color: _amber,
-      xFor: xFor,
-    );
-    _drawSeries(
-      canvas: canvas,
-      plot: plot,
-      points: points,
-      values: hrvValues,
-      color: _blue,
-      xFor: xFor,
-    );
+    final laneRects = <Rect>[];
+    for (var i = 0; i < lanes.length; i++) {
+      final lane = Rect.fromLTWH(
+        plot.left,
+        plot.top + i * (laneHeight + laneGap),
+        plot.width,
+        laneHeight,
+      );
+      laneRects.add(lane);
+      _drawLaneFrame(canvas, lane, lanes[i]);
+    }
 
     final marks = timeline?.updateMarks ?? const <CalibrationUpdateMark>[];
-    for (var i = 0; i < marks.length; i++) {
-      final mark = marks[i];
-      if (mark.time.isBefore(points.first.time) ||
-          mark.time.isAfter(points.last.time)) {
-        continue;
-      }
-      final x = xFor(mark.time).clamp(plot.left, plot.right).toDouble();
-      final markPaint = Paint()
-        ..color = _mint.withValues(alpha: 0.72)
-        ..strokeWidth = 1.4
-        ..strokeCap = StrokeCap.round;
-      var y = plot.top + 4;
-      while (y < plot.bottom - 4) {
-        canvas.drawLine(
-          Offset(x, y),
-          Offset(x, math.min(y + 7, plot.bottom - 4)),
-          markPaint,
-        );
-        y += 13;
-      }
-      canvas.drawCircle(Offset(x, plot.top + 7), 3.5, Paint()..color = _mint);
-      if (marks.length <= 6 || i == marks.length - 1 || i == 0) {
-        final label = '${mark.progress}%';
-        final textPainter = TextPainter(
-          text: TextSpan(
-            text: label,
-            style: const TextStyle(
-              color: _mint,
-              fontSize: 10,
-              fontWeight: FontWeight.w800,
-            ),
-          ),
-          textDirection: TextDirection.ltr,
-        )..layout();
-        final labelX = (x + 5).clamp(
-          plot.left,
-          math.max(plot.left, plot.right - textPainter.width),
-        );
-        textPainter.paint(canvas, Offset(labelX.toDouble(), plot.top + 8));
-      }
+    _drawCalibrationMarks(
+      canvas: canvas,
+      marks: marks,
+      first: points.first.time,
+      last: points.last.time,
+      plot: plot,
+      profileLane: laneRects.last,
+      xFor: xFor,
+    );
+
+    for (var i = 0; i < lanes.length; i++) {
+      _drawLaneSeries(
+        canvas: canvas,
+        points: points,
+        lane: lanes[i],
+        rect: laneRects[i],
+        xFor: xFor,
+      );
     }
 
     _paintAxisLabel(canvas, size, points.first.time, Alignment.bottomLeft);
     _paintAxisLabel(canvas, size, points.last.time, Alignment.bottomRight);
+    _paintRangeLabel(canvas, size, points.first.time, points.last.time);
   }
 
-  void _drawSeries({
+  double _hrvUpperBound(List<CalibrationTimelinePoint> points) {
+    final values = [
+      for (final point in points)
+        if (point.hrvRmssdMs != null && point.hrvRmssdMs!.isFinite)
+          point.hrvRmssdMs!,
+    ]..sort();
+    if (values.isEmpty) {
+      return 120;
+    }
+    final index = ((values.length - 1) * 0.9).round();
+    final upper = math.max(80.0, values[index] * 1.35);
+    return (_ceilToStep(upper, 20)).clamp(80.0, 300.0).toDouble();
+  }
+
+  double _ceilToStep(double value, double step) {
+    return (value / step).ceil() * step;
+  }
+
+  void _drawLaneFrame(Canvas canvas, Rect rect, _CalibrationLane lane) {
+    final bandPaint = Paint()..color = _surface2.withValues(alpha: 0.26);
+    canvas.drawRRect(
+      RRect.fromRectAndRadius(rect, const Radius.circular(10)),
+      bandPaint,
+    );
+    final gridPaint = Paint()
+      ..color = _line.withValues(alpha: 0.68)
+      ..strokeWidth = 1;
+    canvas.drawLine(
+      Offset(rect.left, rect.center.dy),
+      Offset(rect.right, rect.center.dy),
+      gridPaint,
+    );
+    canvas.drawLine(
+      Offset(rect.left, rect.bottom),
+      Offset(rect.right, rect.bottom),
+      Paint()
+        ..color = _line
+        ..strokeWidth = 1,
+    );
+
+    _paintText(
+      canvas,
+      lane.label,
+      Offset(0, rect.top + 2),
+      color: lane.color,
+      fontSize: 12,
+      fontWeight: FontWeight.w800,
+      maxWidth: 52,
+    );
+    _paintText(
+      canvas,
+      lane.unit,
+      Offset(0, rect.top + 19),
+      color: _muted,
+      fontSize: 10,
+      maxWidth: 52,
+    );
+    _paintText(
+      canvas,
+      lane.format(lane.max),
+      Offset(rect.right + 6, rect.top - 1),
+      color: _muted,
+      fontSize: 9,
+      maxWidth: 24,
+    );
+    _paintText(
+      canvas,
+      lane.format(lane.min),
+      Offset(rect.right + 6, rect.bottom - 12),
+      color: _muted,
+      fontSize: 9,
+      maxWidth: 24,
+    );
+  }
+
+  void _drawCalibrationMarks({
     required Canvas canvas,
+    required List<CalibrationUpdateMark> marks,
+    required DateTime first,
+    required DateTime last,
     required Rect plot,
-    required List<CalibrationTimelinePoint> points,
-    required List<double?> values,
-    required Color color,
+    required Rect profileLane,
     required double Function(DateTime time) xFor,
   }) {
-    final clean = values
-        .whereType<double>()
-        .where((value) {
-          return value.isFinite && value > 0;
-        })
-        .toList(growable: false);
-    if (clean.length < 2) {
-      return;
+    final visibleMarks = [
+      for (final mark in marks)
+        if (!mark.time.isBefore(first) && !mark.time.isAfter(last)) mark,
+    ];
+    for (var i = 0; i < visibleMarks.length; i++) {
+      final mark = visibleMarks[i];
+      final x = xFor(mark.time).clamp(plot.left, plot.right).toDouble();
+      _drawDashedLine(
+        canvas,
+        Offset(x, plot.top),
+        Offset(x, plot.bottom),
+        Paint()
+          ..color = _mint.withValues(alpha: 0.34)
+          ..strokeWidth = 1.2
+          ..strokeCap = StrokeCap.round,
+      );
+      final y = _yFor(mark.progress.toDouble(), profileLane, 0, 100);
+      canvas.drawCircle(Offset(x, y), 4.2, Paint()..color = _mint);
+      canvas.drawCircle(
+        Offset(x, y),
+        7,
+        Paint()
+          ..color = _mint.withValues(alpha: 0.16)
+          ..style = PaintingStyle.fill,
+      );
+      if (visibleMarks.length <= 4 || i == 0 || i == visibleMarks.length - 1) {
+        final label = '${mark.progress}%';
+        final labelX = (x + 5).clamp(plot.left, plot.right - 24).toDouble();
+        _paintText(
+          canvas,
+          label,
+          Offset(labelX, profileLane.top + 3),
+          color: _mint,
+          fontSize: 10,
+          fontWeight: FontWeight.w800,
+          maxWidth: 36,
+        );
+      }
     }
+  }
 
-    final minValue = clean.reduce(math.min);
-    final maxValue = clean.reduce(math.max);
-    final span = math.max(1.0, maxValue - minValue);
+  void _drawLaneSeries({
+    required Canvas canvas,
+    required List<CalibrationTimelinePoint> points,
+    required _CalibrationLane lane,
+    required Rect rect,
+    required double Function(DateTime time) xFor,
+  }) {
+    final latest = _latestValue(points, lane);
     final path = Path();
     var drawing = false;
+    var sampleCount = 0;
 
-    for (var i = 0; i < points.length; i++) {
-      final value = values[i];
+    for (final point in points) {
+      final value = lane.valueFor(point);
       if (value == null || !value.isFinite || value <= 0) {
         drawing = false;
         continue;
       }
-      final normalized = ((value - minValue) / span).clamp(0.0, 1.0);
-      final x = xFor(points[i].time);
-      final y = plot.bottom - normalized * plot.height;
+      sampleCount++;
+      final x = xFor(point.time);
+      final y = _yFor(value, rect, lane.min, lane.max);
       if (!drawing) {
         path.moveTo(x, y);
         drawing = true;
@@ -1542,15 +1654,131 @@ class _CalibrationTimelinePainter extends CustomPainter {
       }
     }
 
+    if (sampleCount < 2) {
+      _paintText(
+        canvas,
+        'No clean samples yet',
+        Offset(rect.left + 10, rect.center.dy - 8),
+        color: _muted,
+        fontSize: 11,
+        maxWidth: rect.width - 20,
+      );
+      return;
+    }
+
+    canvas.save();
+    canvas.clipRRect(RRect.fromRectAndRadius(rect, const Radius.circular(10)));
     canvas.drawPath(
       path,
       Paint()
-        ..color = color
-        ..strokeWidth = 2.4
+        ..color = lane.color.withValues(alpha: 0.94)
+        ..strokeWidth = 2.2
         ..strokeCap = StrokeCap.round
         ..strokeJoin = StrokeJoin.round
         ..style = PaintingStyle.stroke,
     );
+    canvas.restore();
+
+    if (latest != null) {
+      final latestY = _yFor(latest, rect, lane.min, lane.max);
+      final latestLabel = lane.format(latest);
+      final chipWidth = math.max(34.0, latestLabel.length * 7.0 + 16);
+      final chip = RRect.fromRectAndRadius(
+        Rect.fromLTWH(
+          rect.right - chipWidth - 6,
+          (latestY - 12).clamp(rect.top + 3, rect.bottom - 25).toDouble(),
+          chipWidth,
+          22,
+        ),
+        const Radius.circular(11),
+      );
+      canvas.drawRRect(
+        chip,
+        Paint()..color = lane.color.withValues(alpha: 0.18),
+      );
+      canvas.drawRRect(
+        chip,
+        Paint()
+          ..color = lane.color.withValues(alpha: 0.72)
+          ..style = PaintingStyle.stroke
+          ..strokeWidth = 1,
+      );
+      _paintText(
+        canvas,
+        latestLabel,
+        Offset(chip.outerRect.left + 8, chip.outerRect.top + 4),
+        color: _text,
+        fontSize: 10,
+        fontWeight: FontWeight.w800,
+        maxWidth: chipWidth - 12,
+      );
+    }
+  }
+
+  double? _latestValue(
+    List<CalibrationTimelinePoint> points,
+    _CalibrationLane lane,
+  ) {
+    for (final point in points.reversed) {
+      final value = lane.valueFor(point);
+      if (value != null && value.isFinite && value > 0) {
+        return value;
+      }
+    }
+    return null;
+  }
+
+  double _yFor(double value, Rect rect, double min, double max) {
+    final span = math.max(1.0, max - min);
+    final normalized = ((value - min) / span).clamp(0.0, 1.0);
+    return rect.bottom - normalized * rect.height;
+  }
+
+  void _drawDashedLine(Canvas canvas, Offset start, Offset end, Paint paint) {
+    const dash = 6.0;
+    const gap = 6.0;
+    final total = (end - start).distance;
+    if (total <= 0) {
+      return;
+    }
+    final direction = (end - start) / total;
+    var distance = 0.0;
+    while (distance < total) {
+      final next = math.min(distance + dash, total);
+      canvas.drawLine(
+        start + direction * distance,
+        start + direction * next,
+        paint,
+      );
+      distance += dash + gap;
+    }
+  }
+
+  void _paintText(
+    Canvas canvas,
+    String text,
+    Offset offset, {
+    required Color color,
+    double fontSize = 10,
+    FontWeight fontWeight = FontWeight.w600,
+    double? maxWidth,
+  }) {
+    final textPainter = TextPainter(
+      text: TextSpan(
+        text: text,
+        style: TextStyle(
+          color: color,
+          fontSize: fontSize,
+          fontWeight: fontWeight,
+          height: 1.05,
+        ),
+      ),
+      textDirection: TextDirection.ltr,
+      maxLines: 1,
+      ellipsis: '...',
+    );
+    textPainter.layout(maxWidth: maxWidth ?? double.infinity);
+    textPainter.paint(canvas, offset);
   }
 
   void _paintCenteredLabel(Canvas canvas, Size size, String label) {
@@ -1589,10 +1817,58 @@ class _CalibrationTimelinePainter extends CustomPainter {
     textPainter.paint(canvas, Offset(x, size.height - textPainter.height));
   }
 
+  void _paintRangeLabel(
+    Canvas canvas,
+    Size size,
+    DateTime first,
+    DateTime last,
+  ) {
+    final span = last.difference(first);
+    final label = span.inHours >= 1
+        ? '${span.inHours}h ${span.inMinutes.remainder(60)}m window'
+        : '${math.max(1, span.inMinutes)}m window';
+    final textPainter = TextPainter(
+      text: TextSpan(
+        text: label,
+        style: const TextStyle(
+          color: _muted,
+          fontSize: 10,
+          fontWeight: FontWeight.w700,
+        ),
+      ),
+      textDirection: TextDirection.ltr,
+      maxLines: 1,
+    )..layout(maxWidth: size.width / 2);
+    textPainter.paint(
+      canvas,
+      Offset((size.width - textPainter.width) / 2, size.height - 13),
+    );
+  }
+
   @override
   bool shouldRepaint(covariant _CalibrationTimelinePainter oldDelegate) {
     return oldDelegate.timeline != timeline;
   }
+}
+
+class _CalibrationLane {
+  const _CalibrationLane({
+    required this.label,
+    required this.unit,
+    required this.min,
+    required this.max,
+    required this.color,
+    required this.valueFor,
+    required this.format,
+  });
+
+  final String label;
+  final String unit;
+  final double min;
+  final double max;
+  final Color color;
+  final double? Function(CalibrationTimelinePoint point) valueFor;
+  final String Function(double value) format;
 }
 
 class _CalibrationPlotLegend extends StatelessWidget {
