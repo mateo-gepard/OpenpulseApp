@@ -236,14 +236,14 @@ class TodayView extends StatelessWidget {
               value: live?.heartRateBpm == null
                   ? '--'
                   : live!.heartRateBpm!.toStringAsFixed(0),
-              footer: live?.hrConfidenceLabel ?? 'warming up',
+              footer: live?.hrStatusLabel ?? 'warming up',
               progress: ((live?.hrConfidence ?? 0) / 100).clamp(0.0, 1.0),
               color: _red,
             ),
             _MetricRing(
               label: 'SpO2',
               value: live?.spo2Percent == null ? '--' : '${live!.spo2Percent}',
-              footer: live?.spo2ConfidenceLabel ?? 'experimental',
+              footer: live?.spo2StatusLabel ?? 'stillness only',
               progress: ((live?.spo2Confidence ?? 0) / 100).clamp(0.0, 1.0),
               color: _amber,
             ),
@@ -263,7 +263,7 @@ class TodayView extends StatelessWidget {
               icon: Icons.favorite_rounded,
               label: 'HR',
               value: live?.heartRateBpm == null
-                  ? 'Not computed'
+                  ? live?.hrStatusLabel ?? 'Not computed'
                   : '${live!.heartRateBpm!.toStringAsFixed(1)} bpm · ${live.hrConfidenceLabel}',
             ),
             _StripItem(
@@ -277,7 +277,7 @@ class TodayView extends StatelessWidget {
               icon: Icons.water_drop_rounded,
               label: 'SpO2',
               value: live?.spo2Percent == null
-                  ? 'Experimental warmup'
+                  ? live?.spo2StatusLabel ?? 'Stillness only'
                   : '${live!.spo2Percent}% · ${live.spo2ConfidenceLabel}',
             ),
             _StripItem(
@@ -530,12 +530,12 @@ class LiveView extends StatelessWidget {
             _StripItem(
               icon: Icons.favorite_rounded,
               label: 'HR certainty',
-              value: live?.hrConfidenceLabel ?? 'Warming up',
+              value: live?.hrStatusLabel ?? 'Warming up',
             ),
             _StripItem(
               icon: Icons.water_drop_rounded,
               label: 'SpO2 certainty',
-              value: live?.spo2ConfidenceLabel ?? 'Experimental',
+              value: live?.spo2StatusLabel ?? 'Stillness only',
             ),
             _StripItem(
               icon: Icons.timeline_rounded,
@@ -580,7 +580,7 @@ class LiveView extends StatelessWidget {
               _FactRow(
                 'HR',
                 live?.heartRateBpm == null
-                    ? 'Waiting'
+                    ? live?.hrStatusLabel ?? 'Waiting'
                     : '${live!.heartRateBpm!.toStringAsFixed(1)} bpm (${live.hrConfidenceLabel})',
               ),
               _FactRow(
@@ -590,7 +590,7 @@ class LiveView extends StatelessWidget {
               _FactRow(
                 'SpO2',
                 live?.spo2Percent == null
-                    ? 'Waiting'
+                    ? live?.spo2StatusLabel ?? 'Waiting'
                     : '${live!.spo2Percent}% (${live.spo2ConfidenceLabel})',
               ),
               _FactRow(
@@ -686,7 +686,7 @@ class HistoryView extends StatelessWidget {
               icon: Icons.favorite_rounded,
               label: 'HR',
               value:
-                  controller.latestLiveRecord?.hrConfidenceLabel ??
+                  controller.latestLiveRecord?.hrStatusLabel ??
                   'Needs 15-30s signal',
             ),
             _StripItem(
@@ -699,8 +699,8 @@ class HistoryView extends StatelessWidget {
               icon: Icons.water_drop_rounded,
               label: 'SpO2',
               value:
-                  controller.latestLiveRecord?.spo2ConfidenceLabel ??
-                  'Experimental',
+                  controller.latestLiveRecord?.spo2StatusLabel ??
+                  'Stillness only',
             ),
           ],
         ),
@@ -1339,14 +1339,14 @@ class _CalibrationPanelState extends State<_CalibrationPanel> {
               value: hrProgress,
               color: _red,
               label: 'HR confidence',
-              trailing: widget.live?.hrConfidenceLabel ?? 'waiting',
+              trailing: widget.live?.hrStatusLabel ?? 'waiting',
             ),
             const SizedBox(height: 12),
             _ProgressLine(
               value: spo2Progress,
               color: _amber,
               label: 'SpO2 confidence',
-              trailing: widget.live?.spo2ConfidenceLabel ?? 'waiting',
+              trailing: widget.live?.spo2StatusLabel ?? 'waiting',
             ),
             if (!widget.compact || _expanded) ...[
               const SizedBox(height: 12),

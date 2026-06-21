@@ -331,6 +331,55 @@ class LiveRecord {
 
   String get hrConfidenceLabel => _confidenceLabel(hrConfidence);
   String get spo2ConfidenceLabel => _confidenceLabel(spo2Confidence);
+  String get hrStatusLabel {
+    if (heartRateBpm != null) {
+      return hrConfidenceLabel;
+    }
+    if (puckChanged) {
+      return 'Sensor reconnecting';
+    }
+    if (hasMotionArtifact) {
+      return 'Hold still';
+    }
+    if (hasPpgClipping) {
+      return 'Too much light';
+    }
+    if (hasLowPerfusion) {
+      return 'Weak optical signal';
+    }
+    if (!hasSkinContact) {
+      return 'Needs contact';
+    }
+    if (isUncalibrated) {
+      return 'Calibrating';
+    }
+    return 'Waiting';
+  }
+
+  String get spo2StatusLabel {
+    if (spo2Percent != null) {
+      return spo2ConfidenceLabel;
+    }
+    if (puckChanged) {
+      return 'Sensor reconnecting';
+    }
+    if (hasMotionArtifact) {
+      return 'Hold still';
+    }
+    if (hasPpgClipping) {
+      return 'Too much light';
+    }
+    if (hasLowPerfusion) {
+      return 'Needs stronger red/IR';
+    }
+    if (!hasSkinContact) {
+      return 'Needs contact';
+    }
+    if (isUncalibrated) {
+      return 'Calibrating red/IR';
+    }
+    return 'Waiting';
+  }
 
   String get motionLabel {
     switch (motionStatus) {

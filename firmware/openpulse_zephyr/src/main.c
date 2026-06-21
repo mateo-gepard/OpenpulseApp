@@ -21,7 +21,7 @@
 
 LOG_MODULE_REGISTER(openpulse, LOG_LEVEL_INF);
 
-#define OPENPULSE_FW_VERSION "0.1.5-hr-detrend"
+#define OPENPULSE_FW_VERSION "0.1.6-optical-gain"
 #define OPENPULSE_HW_VERSION "xiao_ble/nrf52840/sense"
 
 #define MAXM86161_I2C_ADDR 0x62
@@ -101,6 +101,22 @@ LOG_MODULE_REGISTER(openpulse, LOG_LEVEL_INF);
 #define OP_OPTICAL_CAL_HOUR_MS 3600000
 #define OP_OPTICAL_CAL_FULL_HOURS 24
 #define OP_OPTICAL_MIN_GOOD_HOUR_WINDOWS 60
+#define OP_PPG_RATE_MIN_HZ_X100 2500U
+#define OP_PPG_RATE_MAX_HZ_X100 25600U
+#define OP_LED_AUTO_MIN_MA 2U
+#define OP_LED_AUTO_MAX_MA 24U
+#define OP_LED_AUTO_STEP_MA 2U
+#define OP_LED_AUTO_COOLDOWN_MS 1200
+#define OP_LED_GREEN_DC_MIN 60000U
+#define OP_LED_GREEN_DC_TARGET_HIGH 420000U
+#define OP_LED_RED_IR_DC_MIN 300000U
+#define OP_LED_RED_IR_DC_TARGET_HIGH 470000U
+#define OP_PPG_ADC_CLIP_HIGH 0x78000U
+#define OP_PPG_ADC_CLIP_LOW 200U
+#define OP_SPO2_MIN_AC 200U
+#define OP_SPO2_STILL_ACCEL_LOW_MG 850
+#define OP_SPO2_STILL_ACCEL_HIGH_MG 1150
+#define OP_SPO2_STILL_ACCEL_DELTA_MG 70
 
 #define OP_EVENT_ATTACHED 1
 #define OP_EVENT_REMOVED 2
@@ -313,6 +329,9 @@ static int64_t latest_spo2_valid_ms;
 static uint32_t spo2_ratio_filtered_x1000;
 static int64_t last_live_notification_ms;
 static int64_t optical_motion_hold_until_ms;
+static uint32_t ppg_effective_hz_x100 = 6400U;
+static int64_t ppg_rate_last_ms;
+static int64_t ppg_led_last_auto_gain_ms;
 static bool clock_anchor_valid;
 static const struct flash_area *history_flash_area;
 static bool history_flash_ready;
@@ -454,6 +473,8 @@ static uint8_t probe_maxm86161(void);
 static uint8_t prepare_maxm86161(void);
 static void stop_maxm86161(void);
 static void ppg_buffer_reset(void);
+static void reset_optical_processing_state(bool reset_calibration);
+static void reset_ppg_effective_rate(void);
 static int read_maxm86161_fifo_payload(uint8_t *payload,
 				       uint8_t max_payload_len,
 				       uint8_t *payload_len);
@@ -864,6 +885,7 @@ static ssize_t write_control(struct bt_conn *conn,
 		}
 		sampling_hz = sys_get_le16(payload);
 		maxm86161_configured = false;
+		reset_optical_processing_state(true);
 		notify_control_ack(command, 0);
 		break;
 	case 0x04:
@@ -874,6 +896,7 @@ static ssize_t write_control(struct bt_conn *conn,
 		led_red_ma = payload[1];
 		led_ir_ma = payload[2];
 		maxm86161_configured = false;
+		reset_optical_processing_state(true);
 		notify_control_ack(command, 0);
 		break;
 	case 0x05:
@@ -1341,6 +1364,7 @@ static int configure_maxm86161(void)
 	maxm86161_config_led_green_ma = led_green_ma;
 	maxm86161_config_led_red_ma = led_red_ma;
 	maxm86161_config_led_ir_ma = led_ir_ma;
+	reset_ppg_effective_rate();
 
 	return 0;
 }
@@ -1374,19 +1398,8 @@ static void stop_maxm86161(void)
 		}
 		maxm86161_configured = false;
 	}
-#endif
-	ppg_metrics_started_ms = 0;
-	ppg_buffer_reset();
-	latest_hr_x10 = 0;
-	latest_ibi_ms = 0;
-	latest_spo2_percent = 0xff;
-	latest_hr_confidence = 0;
-	latest_spo2_confidence = 0;
-	latest_metric_calibration = 0;
-	last_hr_compute_ms = 0;
-	latest_hr_valid_ms = 0;
-	latest_spo2_valid_ms = 0;
-	spo2_ratio_filtered_x1000 = 0;
+	#endif
+	reset_optical_processing_state(false);
 }
 
 static uint8_t confidence_ramp(int64_t started_ms, uint32_t target_ms)
@@ -1569,6 +1582,80 @@ static void ppg_buffer_reset(void)
 	ppg_ring_reset(&ppg_ir_ring);
 }
 
+static void reset_ppg_effective_rate(void)
+{
+	ppg_rate_last_ms = 0;
+	ppg_effective_hz_x100 = sampling_hz > 0 ? (uint32_t)sampling_hz * 100U :
+						  6400U;
+}
+
+static uint16_t ppg_effective_hz(void)
+{
+	uint32_t hz_x100 = ppg_effective_hz_x100;
+	uint32_t hz;
+
+	if (hz_x100 == 0) {
+		hz_x100 = sampling_hz > 0 ? (uint32_t)sampling_hz * 100U : 6400U;
+	}
+
+	hz = (hz_x100 + 50U) / 100U;
+	if (hz == 0) {
+		hz = 1;
+	}
+
+	return hz > UINT16_MAX ? UINT16_MAX : (uint16_t)hz;
+}
+
+static void reset_optical_processing_state(bool reset_calibration)
+{
+	ppg_metrics_started_ms = 0;
+	ppg_buffer_reset();
+	reset_ppg_effective_rate();
+	latest_hr_x10 = 0;
+	latest_ibi_ms = 0;
+	latest_spo2_percent = 0xff;
+	latest_hr_confidence = 0;
+	latest_spo2_confidence = 0;
+	latest_metric_calibration = 0;
+	last_hr_compute_ms = 0;
+	latest_hr_valid_ms = 0;
+	latest_spo2_valid_ms = 0;
+	spo2_ratio_filtered_x1000 = 0;
+	if (reset_calibration) {
+		memset(&optical_cal, 0, sizeof(optical_cal));
+	}
+}
+
+static void update_ppg_effective_rate(uint16_t green_samples)
+{
+	int64_t now_ms = k_uptime_get();
+	int64_t delta_ms;
+	uint32_t measured_hz_x100;
+
+	if (green_samples == 0) {
+		return;
+	}
+
+	if (ppg_rate_last_ms > 0) {
+		delta_ms = now_ms - ppg_rate_last_ms;
+		if (delta_ms >= 80 && delta_ms <= 2000) {
+			measured_hz_x100 =
+				(uint32_t)(((uint64_t)green_samples * 100000U) /
+					   (uint64_t)delta_ms);
+			if (measured_hz_x100 >= OP_PPG_RATE_MIN_HZ_X100 &&
+			    measured_hz_x100 <= OP_PPG_RATE_MAX_HZ_X100) {
+				ppg_effective_hz_x100 =
+					ppg_effective_hz_x100 == 0 ?
+						measured_hz_x100 :
+						(uint32_t)(((uint64_t)ppg_effective_hz_x100 * 7U +
+							    measured_hz_x100 + 4U) / 8U);
+			}
+		}
+	}
+
+	ppg_rate_last_ms = now_ms;
+}
+
 static void ppg_ring_push(struct ppg_ring *ring, uint32_t sample)
 {
 	ring->samples[ring->head] = sample;
@@ -1590,12 +1677,13 @@ static uint32_t ppg_ring_sample_at(const struct ppg_ring *ring, uint16_t chronol
 static uint32_t ppg_window_sample_limit(uint32_t window_ms)
 {
 	uint32_t samples;
+	uint16_t hz = ppg_effective_hz();
 
-	if (sampling_hz == 0) {
+	if (hz == 0) {
 		return 0;
 	}
 
-	samples = (uint32_t)(((uint64_t)sampling_hz * window_ms + 999U) / 1000U);
+	samples = (uint32_t)(((uint64_t)hz * window_ms + 999U) / 1000U);
 	if (samples > OP_PPG_BUFFER_LEN) {
 		samples = OP_PPG_BUFFER_LEN;
 	}
@@ -1697,6 +1785,111 @@ static void ppg_stats_add_ir(struct ppg_window_stats *stats, uint32_t sample)
 	stats->ir_count++;
 }
 
+static bool led_auto_adjust_channel(uint8_t *current_ma,
+				    uint32_t dc,
+				    uint32_t max_sample,
+				    uint32_t target_min,
+				    uint32_t target_high)
+{
+	uint8_t next_ma = *current_ma;
+
+	if (*current_ma == 0 || dc == 0) {
+		return false;
+	}
+
+	if ((max_sample >= OP_PPG_ADC_CLIP_HIGH || dc > target_high) &&
+	    next_ma > OP_LED_AUTO_MIN_MA) {
+		next_ma = next_ma > OP_LED_AUTO_MIN_MA + OP_LED_AUTO_STEP_MA ?
+			  next_ma - OP_LED_AUTO_STEP_MA : OP_LED_AUTO_MIN_MA;
+	} else if (dc < target_min && next_ma < OP_LED_AUTO_MAX_MA) {
+		next_ma = next_ma + OP_LED_AUTO_STEP_MA;
+		if (next_ma > OP_LED_AUTO_MAX_MA) {
+			next_ma = OP_LED_AUTO_MAX_MA;
+		}
+		if (next_ma < OP_LED_AUTO_MIN_MA) {
+			next_ma = OP_LED_AUTO_MIN_MA;
+		}
+	}
+
+	if (next_ma == *current_ma) {
+		return false;
+	}
+
+	*current_ma = next_ma;
+	return true;
+}
+
+static bool update_led_auto_gain(const struct ppg_window_stats *stats,
+				 uint8_t *quality)
+{
+	uint32_t green_dc = stats_mean(stats->green_sum, stats->green_count);
+	uint32_t red_dc = stats_mean(stats->red_sum, stats->red_count);
+	uint32_t ir_dc = stats_mean(stats->ir_sum, stats->ir_count);
+	bool red_ir_present = stats->red_count >= 4U && stats->ir_count >= 4U;
+	bool changed = false;
+	int64_t now_ms = k_uptime_get();
+
+	if (stats->green_count >= 4U) {
+		*quality |= OP_QUALITY_SKIN_CONTACT;
+		if (green_dc < OP_LED_GREEN_DC_MIN) {
+			*quality |= OP_QUALITY_LOW_PERFUSION;
+		}
+		if (stats->green_max >= OP_PPG_ADC_CLIP_HIGH ||
+		    stats->green_min <= OP_PPG_ADC_CLIP_LOW) {
+			*quality |= OP_QUALITY_PPG_CLIPPING;
+		}
+	}
+
+	if (red_ir_present &&
+	    (red_dc < OP_LED_RED_IR_DC_MIN || ir_dc < OP_LED_RED_IR_DC_MIN)) {
+		*quality |= OP_QUALITY_LOW_PERFUSION | OP_QUALITY_PPG_UNCALIBRATED;
+	}
+	if ((stats->red_count >= 4U &&
+	     (stats->red_max >= OP_PPG_ADC_CLIP_HIGH ||
+	      stats->red_min <= OP_PPG_ADC_CLIP_LOW)) ||
+	    (stats->ir_count >= 4U &&
+	     (stats->ir_max >= OP_PPG_ADC_CLIP_HIGH ||
+	      stats->ir_min <= OP_PPG_ADC_CLIP_LOW))) {
+		*quality |= OP_QUALITY_PPG_CLIPPING;
+	}
+
+	if (now_ms - ppg_led_last_auto_gain_ms < OP_LED_AUTO_COOLDOWN_MS) {
+		return false;
+	}
+
+	if (stats->green_count >= 4U) {
+		changed |= led_auto_adjust_channel(&led_green_ma, green_dc,
+						   stats->green_max,
+						   OP_LED_GREEN_DC_MIN,
+						   OP_LED_GREEN_DC_TARGET_HIGH);
+	}
+	if (red_ir_present) {
+		changed |= led_auto_adjust_channel(&led_red_ma, red_dc,
+						   stats->red_max,
+						   OP_LED_RED_IR_DC_MIN,
+						   OP_LED_RED_IR_DC_TARGET_HIGH);
+		changed |= led_auto_adjust_channel(&led_ir_ma, ir_dc,
+						   stats->ir_max,
+						   OP_LED_RED_IR_DC_MIN,
+						   OP_LED_RED_IR_DC_TARGET_HIGH);
+	}
+
+	if (!changed) {
+		return false;
+	}
+
+	ppg_led_last_auto_gain_ms = now_ms;
+	maxm86161_configured = false;
+	reset_optical_processing_state(true);
+	*quality |= OP_QUALITY_PPG_UNCALIBRATED;
+	LOG_INF("PPG auto gain green=%umA red=%umA ir=%umA dc g/r/ir=%u/%u/%u",
+		(unsigned int)led_green_ma, (unsigned int)led_red_ma,
+		(unsigned int)led_ir_ma, (unsigned int)green_dc,
+		(unsigned int)red_dc, (unsigned int)ir_dc);
+
+	return true;
+}
+
 static uint8_t optical_calibration_progress(void)
 {
 	uint32_t initial_progress = 0;
@@ -1756,9 +1949,17 @@ static void update_optical_calibration(struct ppg_window_stats *stats,
 	uint32_t green_ac = stats_range(stats->green_min, stats->green_max);
 	uint32_t red_ac = stats_range(stats->red_min, stats->red_max);
 	uint32_t ir_ac = stats_range(stats->ir_min, stats->ir_max);
-	bool green_good = stats->green_count >= 8U && green_dc > 0 && green_ac >= 300U;
+	bool green_good = stats->green_count >= 8U &&
+			  green_dc >= OP_LED_GREEN_DC_MIN &&
+			  green_ac >= 300U;
 	bool red_ir_good = stats->red_count >= 8U && stats->ir_count >= 8U &&
-			   red_dc > 0 && ir_dc > 0 && red_ac >= 120U && ir_ac >= 120U;
+			   red_dc >= OP_LED_RED_IR_DC_MIN &&
+			   ir_dc >= OP_LED_RED_IR_DC_MIN &&
+			   red_ac >= 120U && ir_ac >= 120U;
+	bool still_enough = motion_status != OP_MOTION_STATUS_OK ||
+			    (latest_accel_milli_g >= OP_SPO2_STILL_ACCEL_LOW_MG &&
+			     latest_accel_milli_g <= OP_SPO2_STILL_ACCEL_HIGH_MG &&
+			     latest_accel_delta_mg <= OP_SPO2_STILL_ACCEL_DELTA_MG);
 	int64_t now_ms = k_uptime_get();
 
 	if (optical_cal.started_ms == 0) {
@@ -1785,9 +1986,7 @@ static void update_optical_calibration(struct ppg_window_stats *stats,
 		}
 	}
 
-	if (green_good && red_ir_good && stats->ratio_x1000 > 0 &&
-	    (motion_status != OP_MOTION_STATUS_OK ||
-	     (latest_accel_milli_g >= 850 && latest_accel_milli_g <= 1150))) {
+	if (green_good && red_ir_good && stats->ratio_x1000 > 0 && still_enough) {
 		optical_cal.initialized = true;
 		optical_cal.hour_green_dc_sum += green_dc;
 		optical_cal.hour_green_ac_sum += green_ac;
@@ -1801,7 +2000,14 @@ static void update_optical_calibration(struct ppg_window_stats *stats,
 		optical_cal.rejected_windows++;
 	}
 
-	if (green_ac > 0x78000U || red_ac > 0x78000U || ir_ac > 0x78000U) {
+	if (!green_good || !red_ir_good) {
+		*quality |= OP_QUALITY_LOW_PERFUSION | OP_QUALITY_PPG_UNCALIBRATED;
+	}
+	if (!still_enough) {
+		*quality |= OP_QUALITY_MOTION_ARTIFACT | OP_QUALITY_PPG_UNCALIBRATED;
+	}
+	if (green_ac > OP_PPG_ADC_CLIP_HIGH || red_ac > OP_PPG_ADC_CLIP_HIGH ||
+	    ir_ac > OP_PPG_ADC_CLIP_HIGH) {
 		*quality |= OP_QUALITY_PPG_CLIPPING;
 	}
 
@@ -1899,8 +2105,9 @@ static void ppg_hr_consider_peak(struct ppg_hr_candidate *candidate,
 	}
 
 	if (interval_samples <= max_peak_gap_samples) {
-		uint32_t ibi_ms = (interval_samples * 1000U + sampling_hz / 2U) /
-				  sampling_hz;
+		uint16_t sample_hz = ppg_effective_hz();
+		uint32_t ibi_ms = (interval_samples * 1000U + sample_hz / 2U) /
+				  sample_hz;
 
 		if (candidate->interval_count < OP_PPG_HR_MAX_INTERVALS) {
 			candidate->intervals[candidate->interval_count++] =
@@ -2105,6 +2312,7 @@ static void compute_hr_from_green(uint8_t *quality)
 	uint32_t min_peak_gap_samples;
 	uint32_t max_peak_gap_samples;
 	uint16_t confidence;
+	uint16_t sample_hz;
 	uint8_t calibration = optical_calibration_progress();
 	int64_t elapsed_ms;
 	int64_t now_ms = k_uptime_get();
@@ -2120,7 +2328,8 @@ static void compute_hr_from_green(uint8_t *quality)
 	}
 	last_hr_compute_ms = now_ms;
 
-	if (sampling_hz == 0) {
+	sample_hz = ppg_effective_hz();
+	if (sample_hz == 0) {
 		hold_hr_value(quality);
 		return;
 	}
@@ -2144,8 +2353,8 @@ static void compute_hr_from_green(uint8_t *quality)
 		*quality |= OP_QUALITY_PPG_CLIPPING;
 	}
 
-	min_peak_gap_samples = ((uint32_t)sampling_hz * OP_PPG_MIN_IBI_MS) / 1000U;
-	max_peak_gap_samples = ((uint32_t)sampling_hz * OP_PPG_MAX_IBI_MS + 999U) / 1000U;
+	min_peak_gap_samples = ((uint32_t)sample_hz * OP_PPG_MIN_IBI_MS) / 1000U;
+	max_peak_gap_samples = ((uint32_t)sample_hz * OP_PPG_MAX_IBI_MS + 999U) / 1000U;
 	if (min_peak_gap_samples == 0) {
 		min_peak_gap_samples = 1;
 	}
@@ -2273,6 +2482,7 @@ static void compute_spo2_from_window(uint8_t *quality)
 	uint32_t profile_weight;
 	int32_t spo2;
 	uint16_t confidence;
+	uint16_t sample_hz = ppg_effective_hz();
 	uint8_t calibration = optical_calibration_progress();
 	int64_t elapsed_ms;
 	int64_t now_ms = k_uptime_get();
@@ -2294,7 +2504,26 @@ static void compute_spo2_from_window(uint8_t *quality)
 	red_ac = red_stats.max > red_stats.min ? red_stats.max - red_stats.min : 0;
 	ir_ac = ir_stats.max > ir_stats.min ? ir_stats.max - ir_stats.min : 0;
 
-	if (red_dc == 0 || ir_dc == 0 || red_ac < 200U || ir_ac < 200U) {
+	if (motion_status == OP_MOTION_STATUS_OK &&
+	    (latest_accel_milli_g < OP_SPO2_STILL_ACCEL_LOW_MG ||
+	     latest_accel_milli_g > OP_SPO2_STILL_ACCEL_HIGH_MG ||
+	     latest_accel_delta_mg > OP_SPO2_STILL_ACCEL_DELTA_MG)) {
+		*quality |= OP_QUALITY_MOTION_ARTIFACT | OP_QUALITY_PPG_UNCALIBRATED;
+		hold_spo2_value(quality);
+		return;
+	}
+
+	if (red_stats.max >= OP_PPG_ADC_CLIP_HIGH ||
+	    ir_stats.max >= OP_PPG_ADC_CLIP_HIGH ||
+	    red_stats.min <= OP_PPG_ADC_CLIP_LOW ||
+	    ir_stats.min <= OP_PPG_ADC_CLIP_LOW) {
+		*quality |= OP_QUALITY_PPG_CLIPPING | OP_QUALITY_PPG_UNCALIBRATED;
+		hold_spo2_value(quality);
+		return;
+	}
+
+	if (red_dc < OP_LED_RED_IR_DC_MIN || ir_dc < OP_LED_RED_IR_DC_MIN ||
+	    red_ac < OP_SPO2_MIN_AC || ir_ac < OP_SPO2_MIN_AC) {
 		hold_spo2_value(quality);
 		return;
 	}
@@ -2310,16 +2539,11 @@ static void compute_spo2_from_window(uint8_t *quality)
 					      ppg_metrics_started_ms,
 					      OP_PPG_SPO2_CALIBRATION_MS) * 20U / 100U);
 	confidence += (uint16_t)((uint32_t)calibration * 45U / 100U);
-	if (red_stats.count > sampling_hz * 6U && ir_stats.count > sampling_hz * 6U) {
+	if (red_stats.count > sample_hz * 6U && ir_stats.count > sample_hz * 6U) {
 		confidence += 12U;
 	}
-	if (red_stats.count > sampling_hz * 12U && ir_stats.count > sampling_hz * 12U) {
+	if (red_stats.count > sample_hz * 12U && ir_stats.count > sample_hz * 12U) {
 		confidence += 8U;
-	}
-	if (motion_status == OP_MOTION_STATUS_OK &&
-	    (latest_accel_milli_g > 1150 || latest_accel_milli_g < 850)) {
-		*quality |= OP_QUALITY_MOTION_ARTIFACT;
-		confidence = confidence > 25U ? confidence - 25U : 0U;
 	}
 
 	if (spo2_ratio_filtered_x1000 != 0 &&
@@ -2385,6 +2609,8 @@ static void update_optical_metrics(uint8_t *quality)
 	uint8_t payload_len = 0;
 	struct ppg_window_stats stats;
 	uint8_t sensor_status;
+	bool motion_artifact;
+	bool optical_jump;
 
 	ppg_stats_init(&stats);
 	sensor_status = prepare_maxm86161();
@@ -2432,9 +2658,20 @@ static void update_optical_metrics(uint8_t *quality)
 		}
 	}
 
-	if (current_motion_artifact() || ppg_stats_show_optical_jump(&stats)) {
+	update_ppg_effective_rate(stats.green_count);
+	motion_artifact = current_motion_artifact();
+	optical_jump = ppg_stats_show_optical_jump(&stats);
+
+	if (motion_artifact || optical_jump) {
 		*quality |= OP_QUALITY_MOTION_ARTIFACT | OP_QUALITY_PPG_UNCALIBRATED;
 		optical_cal.rejected_windows++;
+		hold_hr_value(quality);
+		hold_spo2_value(quality);
+		latest_metric_calibration = optical_calibration_progress();
+		return;
+	}
+
+	if (update_led_auto_gain(&stats, quality)) {
 		hold_hr_value(quality);
 		hold_spo2_value(quality);
 		latest_metric_calibration = optical_calibration_progress();
