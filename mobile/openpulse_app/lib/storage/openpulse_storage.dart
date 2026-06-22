@@ -390,27 +390,61 @@ class OpenPulseStorage {
     }
 
     final db = _requireDb();
-    final wallTimes = records.map(
-      (record) => record.wallTime.millisecondsSinceEpoch,
-    );
-    final startMs = wallTimes.reduce(math.min);
-    final endMs = wallTimes.reduce(math.max);
+    var stored = 0;
 
     db.execute('BEGIN IMMEDIATE;');
     try {
-      db.execute(
-        'DELETE FROM live_records WHERE wall_time_ms >= ? AND wall_time_ms <= ?',
-        [startMs, endMs],
-      );
       for (final record in records) {
+        if (_hasBackfilledLiveRecord(db, record)) {
+          continue;
+        }
+        _deleteOverlappingBackfillRecord(db, record);
         _insertLiveRecord(db, sessionId, record);
+        stored++;
       }
       db.execute('COMMIT;');
-      return records.length;
+      return stored;
     } catch (_) {
       db.execute('ROLLBACK;');
       rethrow;
     }
+  }
+
+  bool _hasBackfilledLiveRecord(Database db, LiveRecord record) {
+    final rows = db.select(
+      '''
+      SELECT 1
+      FROM live_records
+      WHERE device_uptime_ms = ?
+        AND ABS((wall_time_ms - device_uptime_ms) - ?) <= ?
+      LIMIT 1
+      ''',
+      [
+        record.deviceUptimeMs,
+        _recordBootStartMs(record),
+        const Duration(minutes: 10).inMilliseconds,
+      ],
+    );
+    return rows.isNotEmpty;
+  }
+
+  void _deleteOverlappingBackfillRecord(Database db, LiveRecord record) {
+    db.execute(
+      '''
+      DELETE FROM live_records
+      WHERE device_uptime_ms = ?
+        AND ABS((wall_time_ms - device_uptime_ms) - ?) <= ?
+      ''',
+      [
+        record.deviceUptimeMs,
+        _recordBootStartMs(record),
+        const Duration(minutes: 10).inMilliseconds,
+      ],
+    );
+  }
+
+  int _recordBootStartMs(LiveRecord record) {
+    return record.wallTime.millisecondsSinceEpoch - record.deviceUptimeMs;
   }
 
   int latestDeviceUptimeForCurrentBoot({
@@ -994,18 +1028,7 @@ class OpenPulseStorage {
       return estimatedStart.add(const Duration(minutes: 2));
     }
 
-    CalibrationUpdateMark? lastProgressMark;
-    for (final mark in marks.reversed) {
-      if (mark.progress == latestProgress) {
-        lastProgressMark = mark;
-        break;
-      }
-    }
-    lastProgressMark ??= marks.isNotEmpty
-        ? marks.last
-        : CalibrationUpdateMark(time: latestTime, progress: latestProgress);
-
-    return lastProgressMark.time.add(const Duration(hours: 1));
+    return null;
   }
 
   List<Map<String, Object?>> _selectMaps(

@@ -21,7 +21,7 @@
 
 LOG_MODULE_REGISTER(openpulse, LOG_LEVEL_INF);
 
-#define OPENPULSE_FW_VERSION "0.1.7-hrv-uptime"
+#define OPENPULSE_FW_VERSION "0.1.8-cal-sync"
 #define OPENPULSE_HW_VERSION "xiao_ble/nrf52840/sense"
 
 #define MAXM86161_I2C_ADDR 0x62
@@ -100,7 +100,7 @@ LOG_MODULE_REGISTER(openpulse, LOG_LEVEL_INF);
 #define OP_OPTICAL_HOLD_MS 15000
 #define OP_OPTICAL_FIRST_CAL_MS 120000
 #define OP_OPTICAL_CAL_HOUR_MS 3600000
-#define OP_OPTICAL_CAL_FULL_HOURS 24
+#define OP_OPTICAL_CAL_FULL_HOURS 6
 #define OP_OPTICAL_MIN_GOOD_HOUR_WINDOWS 60
 #define OP_PPG_RATE_MIN_HZ_X100 2500U
 #define OP_PPG_RATE_MAX_HZ_X100 25600U
@@ -1696,6 +1696,8 @@ static void reset_optical_processing_state(bool reset_calibration)
 
 static void reset_optical_after_gain_change(void)
 {
+	int64_t now_ms = k_uptime_get();
+
 	/*
 	 * An auto-gain step changes the optical scale, so the sample buffers and
 	 * the brightness-dependent fast baselines are no longer valid. The
@@ -1731,6 +1733,9 @@ static void reset_optical_after_gain_change(void)
 	optical_cal.hour_ir_ac_sum = 0;
 	optical_cal.hour_ratio_sum = 0;
 	optical_cal.hour_good_windows = 0;
+	if (optical_cal.started_ms > 0) {
+		optical_cal.last_hour_update_ms = now_ms;
+	}
 }
 
 static void update_ppg_effective_rate(uint16_t green_samples)
@@ -2000,8 +2005,11 @@ static bool update_led_auto_gain(const struct ppg_window_stats *stats,
 static uint8_t optical_calibration_progress(void)
 {
 	uint32_t initial_progress = 0;
-	uint32_t hourly_progress;
+	uint32_t committed_progress;
+	uint32_t elapsed_progress = 0;
+	uint32_t profile_progress;
 	int64_t elapsed_ms;
+	uint64_t full_learning_ms;
 
 	if (optical_cal.started_ms <= 0) {
 		return 0;
@@ -2016,13 +2024,26 @@ static uint8_t optical_calibration_progress(void)
 		}
 	}
 
-	hourly_progress = ((uint32_t)optical_cal.hourly_updates * 70U) /
-			  OP_OPTICAL_CAL_FULL_HOURS;
-	if (hourly_progress > 70U) {
-		hourly_progress = 70U;
+	committed_progress = ((uint32_t)optical_cal.hourly_updates * 70U) /
+			     OP_OPTICAL_CAL_FULL_HOURS;
+	if (committed_progress > 70U) {
+		committed_progress = 70U;
 	}
 
-	return (uint8_t)min_u32(100U, initial_progress + hourly_progress);
+	if (elapsed_ms > OP_OPTICAL_FIRST_CAL_MS) {
+		full_learning_ms = (uint64_t)OP_OPTICAL_CAL_FULL_HOURS *
+				   OP_OPTICAL_CAL_HOUR_MS;
+		elapsed_progress =
+			(uint32_t)((((uint64_t)elapsed_ms - OP_OPTICAL_FIRST_CAL_MS) *
+				    70U) / full_learning_ms);
+		if (elapsed_progress > 70U) {
+			elapsed_progress = 70U;
+		}
+	}
+
+	profile_progress = max_u32(committed_progress, elapsed_progress);
+
+	return (uint8_t)min_u32(100U, initial_progress + profile_progress);
 }
 
 static void optical_calibration_commit_hour(uint32_t green_dc,
@@ -2135,6 +2156,10 @@ static void update_optical_calibration(struct ppg_window_stats *stats,
 					   optical_cal.hour_good_windows),
 				(uint32_t)(optical_cal.hour_ratio_sum /
 					   optical_cal.hour_good_windows));
+		} else {
+			LOG_INF("Optical calibration hour kept time progress; good windows %u/%u",
+				optical_cal.hour_good_windows,
+				OP_OPTICAL_MIN_GOOD_HOUR_WINDOWS);
 		}
 
 		optical_cal.hour_green_dc_sum = 0;

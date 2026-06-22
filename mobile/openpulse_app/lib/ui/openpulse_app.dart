@@ -1993,7 +1993,7 @@ class _CalibrationLegend extends StatelessWidget {
           icon: Icons.timer_rounded,
           label: opticalProgress == null
               ? 'Waiting for live stream'
-              : '2 min warmup, then hourly learning',
+              : '2 min warmup, then 6h optical learning',
           color: _mint,
         ),
         _CalibrationChip(
@@ -2579,6 +2579,9 @@ String _nextCalibrationLabel(CalibrationTimeline? timeline) {
   if (progress != null && progress >= 100) {
     return 'Profile ready';
   }
+  if (progress != null && progress >= 30) {
+    return 'Learning continuously';
+  }
   final nextUpdateAt = timeline.nextUpdateAt;
   final remaining = nextUpdateAt == null
       ? timeline.nextUpdateRemaining
@@ -2622,7 +2625,7 @@ String _calibrationShortLabel(int? value) {
     return 'warmup';
   }
   if (value < 100) {
-    return 'hourly learning';
+    return 'optical learning';
   }
   return 'profile ready';
 }

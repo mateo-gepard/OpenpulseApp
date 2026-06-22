@@ -87,8 +87,8 @@ the optical metric as calibrating/experimental.
 
 | Signal | First usable output | Full local window | Baseline target | Max confidence |
 |---|---:|---:|---:|---:|
-| HR | After enough clean peaks | 2 minutes | 24 hourly profile commits | 100 |
-| SpO2 | After red/IR windows are stable | 10 minutes | 24 hourly profile commits plus external reference for true accuracy | 95 |
+| HR | After enough clean peaks | 2 minutes | 6-hour optical learning window | 100 |
+| SpO2 | After red/IR windows are stable | 10 minutes | 6-hour optical learning window plus external reference for true accuracy | 95 |
 | HRV | After 5 clean minutes | 5 minutes | 14 clean days | 95 |
 
 The optical calibration profile updates in two layers:
@@ -97,7 +97,9 @@ The optical calibration profile updates in two layers:
    flickering during the first minutes.
 2. A slow calibration profile commits once per hour when enough clean windows
    were observed. The optical calibration percentage reaches 30% during the
-   initial warmup, then moves toward 100% across 24 hourly commits.
+   initial warmup, then moves continuously toward 100% across a 6-hour optical
+   learning window. If an hour is noisy, the time progress still advances, but
+   HR/SpO2 confidence remains lower until clean optical windows return.
 
 Confidence is an algorithm-quality score. It is not a medical accuracy guarantee.
 Charging the prototype between sessions is fine; stored app data is kept, and the

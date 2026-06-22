@@ -63,6 +63,34 @@ void main() {
     }
   });
 
+  test('backfill storage skips records already present locally', () {
+    final storage = OpenPulseStorage.inMemoryForTests();
+    final now = DateTime.fromMillisecondsSinceEpoch(2_000_000);
+    final existing = _record(wallTime: now, uptimeMs: 100000, sequence: 1);
+    final newRecord = _record(
+      wallTime: now.add(const Duration(seconds: 1)),
+      uptimeMs: 101000,
+      sequence: 2,
+    );
+
+    try {
+      storage.insertLiveRecord(null, existing);
+
+      expect(
+        storage.replaceLiveRecordsFromDeviceBackfill(null, [
+          existing,
+          newRecord,
+        ]),
+        1,
+      );
+
+      final summary = storage.fetchDaySummary(now);
+      expect(summary.liveRecords, 2);
+    } finally {
+      storage.dispose();
+    }
+  });
+
   test('incremental backfill cursor only resumes the current board boot', () {
     final storage = OpenPulseStorage.inMemoryForTests();
     final now = DateTime.fromMillisecondsSinceEpoch(1_000_000);
