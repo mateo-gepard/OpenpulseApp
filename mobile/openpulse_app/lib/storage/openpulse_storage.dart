@@ -7,6 +7,7 @@ import 'package:path_provider/path_provider.dart';
 import 'package:sqlite3/sqlite3.dart';
 
 import '../models/openpulse_models.dart';
+import '../time/openpulse_time.dart';
 
 class OpenPulseStorage {
   OpenPulseStorage();
@@ -191,6 +192,13 @@ class OpenPulseStorage {
       column: 'payload_length',
       definition: 'INTEGER NOT NULL DEFAULT 0',
     );
+    db.execute('''
+      CREATE TABLE IF NOT EXISTS app_settings (
+        key TEXT PRIMARY KEY,
+        value TEXT NOT NULL,
+        updated_at_ms INTEGER NOT NULL
+      );
+    ''');
   }
 
   void _addColumnIfMissing(
@@ -238,6 +246,35 @@ class OpenPulseStorage {
     _requireDb().execute(
       'UPDATE device_sessions SET disconnected_at_ms = ? WHERE id = ?',
       [DateTime.now().millisecondsSinceEpoch, sessionId],
+    );
+  }
+
+  int loadStepGoal({int defaultValue = 10000}) {
+    final rows = _requireDb().select(
+      'SELECT value FROM app_settings WHERE key = ?',
+      ['step_goal'],
+    );
+    if (rows.isEmpty) {
+      return defaultValue;
+    }
+    final parsed = int.tryParse(rows.first['value'] as String? ?? '');
+    return (parsed ?? defaultValue).clamp(500, 100000).toInt();
+  }
+
+  void saveStepGoal(int goal) {
+    _requireDb().execute(
+      '''
+      INSERT INTO app_settings (key, value, updated_at_ms)
+      VALUES (?, ?, ?)
+      ON CONFLICT(key) DO UPDATE SET
+        value = excluded.value,
+        updated_at_ms = excluded.updated_at_ms
+      ''',
+      [
+        'step_goal',
+        goal.clamp(500, 100000).toInt().toString(),
+        DateTime.now().millisecondsSinceEpoch,
+      ],
     );
   }
 
@@ -626,8 +663,8 @@ class OpenPulseStorage {
 
   DaySummary fetchDaySummary(DateTime day) {
     final db = _requireDb();
-    final start = DateTime(day.year, day.month, day.day);
-    final end = start.add(const Duration(days: 1));
+    final start = OpenPulseTime.dayStart(day);
+    final end = OpenPulseTime.nextDayStart(start);
     final startMs = start.millisecondsSinceEpoch;
     final endMs = end.millisecondsSinceEpoch;
 
@@ -652,10 +689,23 @@ class OpenPulseStorage {
       return ms == null ? null : DateTime.fromMillisecondsSinceEpoch(ms);
     }
 
+    final stepRows = db.select(
+      '''
+      SELECT step_count
+      FROM live_records
+      WHERE wall_time_ms >= ?
+        AND wall_time_ms < ?
+        AND step_count IS NOT NULL
+      ORDER BY wall_time_ms ASC, id ASC
+      ''',
+      [startMs, endMs],
+    );
+    final stepSamples = [for (final row in stepRows) row['step_count'] as int];
+
     return DaySummary(
       day: start,
       liveRecords: scalar(
-        'SELECT COUNT(*) FROM live_records WHERE received_at_ms >= ? AND received_at_ms < ?',
+        'SELECT COUNT(*) FROM live_records WHERE wall_time_ms >= ? AND wall_time_ms < ?',
       ),
       rawPpgFrames: scalar(
         'SELECT COUNT(*) FROM raw_ppg_frames WHERE received_at_ms >= ? AND received_at_ms < ?',
@@ -666,16 +716,39 @@ class OpenPulseStorage {
       controlWrites: scalar(
         'SELECT COUNT(*) FROM control_writes WHERE written_at_ms >= ? AND written_at_ms < ?',
       ),
+      stepCount: _dailyStepCount(stepSamples),
       maxSteps: nullableInt(
-        'SELECT MAX(step_count) FROM live_records WHERE received_at_ms >= ? AND received_at_ms < ?',
+        'SELECT MAX(step_count) FROM live_records WHERE wall_time_ms >= ? AND wall_time_ms < ?',
       ),
       lastLiveAt: nullableDate(
-        'SELECT MAX(received_at_ms) FROM live_records WHERE received_at_ms >= ? AND received_at_ms < ?',
+        'SELECT MAX(wall_time_ms) FROM live_records WHERE wall_time_ms >= ? AND wall_time_ms < ?',
       ),
       lastRawAt: nullableDate(
         'SELECT MAX(received_at_ms) FROM raw_ppg_frames WHERE received_at_ms >= ? AND received_at_ms < ?',
       ),
     );
+  }
+
+  int? _dailyStepCount(List<int> samples) {
+    if (samples.isEmpty) {
+      return null;
+    }
+    if (samples.length == 1) {
+      return samples.single;
+    }
+
+    var total = 0;
+    var segmentStart = samples.first;
+    var previous = samples.first;
+    for (final sample in samples.skip(1)) {
+      if (sample < previous) {
+        total += math.max(0, previous - segmentStart);
+        segmentStart = sample;
+      }
+      previous = sample;
+    }
+    total += math.max(0, previous - segmentStart);
+    return total;
   }
 
   HrvSummary fetchHrvSummary({Duration window = const Duration(minutes: 5)}) {

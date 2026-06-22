@@ -122,6 +122,7 @@ class DaySummary {
     required this.rawPpgFrames,
     required this.puckEvents,
     required this.controlWrites,
+    required this.stepCount,
     required this.maxSteps,
     required this.lastLiveAt,
     required this.lastRawAt,
@@ -132,6 +133,7 @@ class DaySummary {
   final int rawPpgFrames;
   final int puckEvents;
   final int controlWrites;
+  final int? stepCount;
   final int? maxSteps;
   final DateTime? lastLiveAt;
   final DateTime? lastRawAt;

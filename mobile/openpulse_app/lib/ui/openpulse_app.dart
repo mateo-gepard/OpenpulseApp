@@ -5,6 +5,7 @@ import 'package:flutter/material.dart';
 
 import '../ble/openpulse_controller.dart';
 import '../models/openpulse_models.dart';
+import '../time/openpulse_time.dart';
 
 const _bg = Color(0xff10181c);
 const _surface = Color(0xff1c262b);
@@ -199,7 +200,7 @@ class TodayView extends StatelessWidget {
     final puck = controller.latestPuckStatus;
     final summary = controller.selectedDaySummary;
     final hrv = controller.latestHrvSummary;
-    final steps = live?.stepCount ?? summary?.maxSteps;
+    final steps = controller.selectedDayStepCount;
     final stepProgress = steps == null
         ? 0.0
         : (steps / controller.stepGoal).clamp(0.0, 1.0).toDouble();
@@ -208,6 +209,12 @@ class TodayView extends StatelessWidget {
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
         _HeroPanel(
+          controller: controller,
+          steps: steps,
+          stepProgress: stepProgress,
+        ),
+        const SizedBox(height: 18),
+        _StepGoalPanel(
           controller: controller,
           steps: steps,
           stepProgress: stepProgress,
@@ -406,6 +413,62 @@ class _HeroPanel extends StatelessWidget {
             color: _mint,
             label: 'Step goal',
             trailing: '${(stepProgress * 100).round()}%',
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _StepGoalPanel extends StatelessWidget {
+  const _StepGoalPanel({
+    required this.controller,
+    required this.steps,
+    required this.stepProgress,
+  });
+
+  final OpenPulseController controller;
+  final int? steps;
+  final double stepProgress;
+
+  @override
+  Widget build(BuildContext context) {
+    return _Surface(
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              const Icon(Icons.flag_rounded, color: _mint),
+              const SizedBox(width: 10),
+              const Expanded(
+                child: Text(
+                  'Daily step goal',
+                  style: TextStyle(fontSize: 18, fontWeight: FontWeight.w900),
+                ),
+              ),
+              Text(
+                '${controller.stepGoal}',
+                style: const TextStyle(fontWeight: FontWeight.w900),
+              ),
+            ],
+          ),
+          const SizedBox(height: 14),
+          _ProgressLine(
+            value: stepProgress,
+            color: _mint,
+            label: steps == null ? 'Waiting for IMU steps' : '$steps steps',
+            trailing: '${(stepProgress * 100).round()}%',
+          ),
+          const SizedBox(height: 14),
+          _SliderRow(
+            label: 'Goal',
+            value: controller.stepGoal.toDouble(),
+            min: 500,
+            max: 50000,
+            divisions: 99,
+            suffix: 'steps',
+            onChanged: (value) => controller.setStepGoal(_snapStepGoal(value)),
           ),
         ],
       ),
@@ -632,7 +695,11 @@ class HistoryView extends StatelessWidget {
                 summary?.rawPpgFrames.toString() ?? '0',
               ),
               _FactRow('Puck events', summary?.puckEvents.toString() ?? '0'),
-              _FactRow('Max steps', summary?.maxSteps?.toString() ?? '--'),
+              _FactRow('Steps', summary?.stepCount?.toString() ?? '--'),
+              _FactRow(
+                'Raw max counter',
+                summary?.maxSteps?.toString() ?? '--',
+              ),
               _FactRow(
                 'Last live sync',
                 summary?.lastLiveAt == null
@@ -2460,38 +2527,15 @@ class _LogoPainter extends CustomPainter {
 }
 
 String _clock(DateTime date) {
-  final hour = date.hour.toString().padLeft(2, '0');
-  final minute = date.minute.toString().padLeft(2, '0');
-  final second = date.second.toString().padLeft(2, '0');
-  return '$hour:$minute:$second';
+  return OpenPulseTime.clock(date);
 }
 
 String _dayLabel(DateTime date) {
-  final today = DateTime.now();
-  final normalized = DateTime(date.year, date.month, date.day);
-  final normalizedToday = DateTime(today.year, today.month, today.day);
-  if (normalized == normalizedToday) {
-    return 'TODAY';
-  }
-  const months = [
-    'JAN',
-    'FEB',
-    'MAR',
-    'APR',
-    'MAY',
-    'JUN',
-    'JUL',
-    'AUG',
-    'SEP',
-    'OCT',
-    'NOV',
-    'DEC',
-  ];
-  return '${date.day} ${months[date.month - 1]}';
+  return OpenPulseTime.dayLabel(date);
 }
 
 String _timeAgo(DateTime date) {
-  final diff = DateTime.now().difference(date);
+  final diff = OpenPulseTime.now().difference(date);
   if (diff.isNegative) {
     return 'clock sync pending';
   }
@@ -2502,6 +2546,10 @@ String _timeAgo(DateTime date) {
     return '${diff.inMinutes}m ago';
   }
   return _clock(date);
+}
+
+int _snapStepGoal(double value) {
+  return (value / 500).round() * 500;
 }
 
 double _normalizedPercent(int? value) {

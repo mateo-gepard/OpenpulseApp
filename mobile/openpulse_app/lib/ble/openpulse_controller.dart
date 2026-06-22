@@ -7,6 +7,7 @@ import 'package:flutter_blue_plus/flutter_blue_plus.dart';
 import '../models/openpulse_models.dart';
 import '../notifications/openpulse_notifications.dart';
 import '../storage/openpulse_storage.dart';
+import '../time/openpulse_time.dart';
 import 'openpulse_ble_contract.dart';
 
 class OpenPulseController extends ChangeNotifier {
@@ -37,7 +38,7 @@ class OpenPulseController extends ChangeNotifier {
   String? latestLiveFrameHex;
   List<LiveRecord> recentLiveRecords = const [];
   List<int> recentRawPpgSamples = const [];
-  DateTime selectedDay = DateTime.now();
+  DateTime selectedDay = OpenPulseTime.dayStart(OpenPulseTime.now());
   DaySummary? selectedDaySummary;
   HrvSummary? latestHrvSummary;
   CalibrationTimeline? calibrationTimeline;
@@ -94,6 +95,21 @@ class OpenPulseController extends ChangeNotifier {
 
   int? get currentStepCount => latestLiveRecord?.stepCount;
 
+  int? get selectedDayStepCount {
+    final summary = selectedDaySummary;
+    final live = latestLiveRecord;
+    if (live?.stepCount != null &&
+        OpenPulseTime.dayStart(live!.wallTime).millisecondsSinceEpoch ==
+            OpenPulseTime.dayStart(selectedDay).millisecondsSinceEpoch) {
+      final dayMax = summary?.maxSteps;
+      final daySteps = summary?.stepCount;
+      if (dayMax != null && daySteps != null && live.stepCount! >= dayMax) {
+        return daySteps + live.stepCount! - dayMax;
+      }
+    }
+    return summary?.stepCount ?? currentStepCount;
+  }
+
   BatteryEstimate? get batteryEstimate {
     final battery = latestBattery;
     if (battery == null || !battery.available || battery.level == null) {
@@ -122,7 +138,7 @@ class OpenPulseController extends ChangeNotifier {
   }
 
   bool get stepGoalReached {
-    final steps = currentStepCount;
+    final steps = selectedDayStepCount;
     return steps != null && steps >= stepGoal;
   }
 
@@ -165,6 +181,7 @@ class OpenPulseController extends ChangeNotifier {
     try {
       await storage.open();
       storageReady = true;
+      stepGoal = storage.loadStepGoal(defaultValue: stepGoal);
       _refreshDerived(force: true);
       try {
         await notifications.initialize();
@@ -311,8 +328,11 @@ class OpenPulseController extends ChangeNotifier {
   }
 
   void setStepGoal(int goal) {
-    stepGoal = goal.clamp(10, 100000).toInt();
-    final steps = currentStepCount;
+    stepGoal = goal.clamp(500, 100000).toInt();
+    if (storageReady) {
+      storage.saveStepGoal(stepGoal);
+    }
+    final steps = selectedDayStepCount;
     if (steps == null || steps < stepGoal) {
       stepGoalNotified = false;
     } else {
@@ -322,27 +342,14 @@ class OpenPulseController extends ChangeNotifier {
   }
 
   void selectPreviousDay() {
-    selectedDay = DateTime(
-      selectedDay.year,
-      selectedDay.month,
-      selectedDay.day - 1,
-    );
+    selectedDay = OpenPulseTime.previousDayStart(selectedDay);
     _refreshDerived(force: true);
     notifyListeners();
   }
 
   void selectNextDay() {
-    final today = DateTime.now();
-    final next = DateTime(
-      selectedDay.year,
-      selectedDay.month,
-      selectedDay.day + 1,
-    );
-    if (DateTime(
-      next.year,
-      next.month,
-      next.day,
-    ).isAfter(DateTime(today.year, today.month, today.day))) {
+    final next = OpenPulseTime.nextDayStart(selectedDay);
+    if (OpenPulseTime.isAfterToday(next)) {
       return;
     }
     selectedDay = next;
@@ -993,7 +1000,7 @@ class OpenPulseController extends ChangeNotifier {
       ...parsed.records,
     ].takeLast(90).toList(growable: false);
     _refreshDerived();
-    final steps = latestLiveRecord?.stepCount;
+    final steps = selectedDayStepCount;
     if (steps != null) {
       if (steps < stepGoal) {
         stepGoalNotified = false;
