@@ -16,6 +16,7 @@ class OpenPulseController extends ChangeNotifier {
   static const _connectTimeout = Duration(seconds: 16);
   static const _reconnectDelay = Duration(seconds: 2);
   static const _scanDuration = Duration(seconds: 10);
+  static const _derivedRefreshInterval = Duration(seconds: 4);
 
   final OpenPulseStorage storage;
   final OpenPulseNotifications notifications;
@@ -89,6 +90,7 @@ class OpenPulseController extends ChangeNotifier {
   int? _savedLedGreenMaBeforeRaw;
   int? _savedLedRedMaBeforeRaw;
   int? _savedLedIrMaBeforeRaw;
+  DateTime? _lastDerivedRefreshAt;
 
   int? get currentStepCount => latestLiveRecord?.stepCount;
 
@@ -163,9 +165,7 @@ class OpenPulseController extends ChangeNotifier {
     try {
       await storage.open();
       storageReady = true;
-      _refreshSelectedDay();
-      _refreshHrvSummary();
-      _refreshCalibrationTimeline();
+      _refreshDerived(force: true);
       try {
         await notifications.initialize();
         notificationsReady = notifications.ready;
@@ -327,8 +327,7 @@ class OpenPulseController extends ChangeNotifier {
       selectedDay.month,
       selectedDay.day - 1,
     );
-    _refreshSelectedDay();
-    _refreshHrvSummary();
+    _refreshDerived(force: true);
     notifyListeners();
   }
 
@@ -347,21 +346,26 @@ class OpenPulseController extends ChangeNotifier {
       return;
     }
     selectedDay = next;
-    _refreshSelectedDay();
+    _refreshDerived(force: true);
     notifyListeners();
   }
 
   Future<void> requestBackfill({bool fullDeviceRestore = false}) async {
-    if (fullDeviceRestore) {
-      deviceRestoreInProgress = true;
-      deviceRestoreRecordCount = 0;
-      statusMessage = 'Restoring phone cache from OpenPulse.';
-      notifyListeners();
-    }
+    final fromDeviceUptimeMs = fullDeviceRestore
+        ? 0
+        : _incrementalBackfillStartUptime();
+
+    deviceRestoreInProgress = true;
+    deviceRestoreRecordCount = 0;
+    statusMessage = fullDeviceRestore
+        ? 'Restoring phone cache from OpenPulse.'
+        : fromDeviceUptimeMs == 0
+        ? 'Syncing device-local OpenPulse records.'
+        : 'Syncing new OpenPulse records only.';
+    notifyListeners();
+
     await _writeControl(
-      OpenPulseBleContract.buildRequestBackfill(
-        fullDeviceRestore ? 0 : _lastDeviceUptimeMs,
-      ),
+      OpenPulseBleContract.buildRequestBackfill(fromDeviceUptimeMs),
     );
   }
 
@@ -369,7 +373,7 @@ class OpenPulseController extends ChangeNotifier {
     if (!bulkBackfillReady) {
       return;
     }
-    await requestBackfill(fullDeviceRestore: true);
+    await requestBackfill();
   }
 
   Future<void> requestRawPpgWindow({int seconds = 1}) async {
@@ -988,9 +992,7 @@ class OpenPulseController extends ChangeNotifier {
       ...recentLiveRecords,
       ...parsed.records,
     ].takeLast(90).toList(growable: false);
-    _refreshSelectedDay();
-    _refreshHrvSummary();
-    _refreshCalibrationTimeline();
+    _refreshDerived();
     final steps = latestLiveRecord?.stepCount;
     if (steps != null) {
       if (steps < stepGoal) {
@@ -1018,7 +1020,7 @@ class OpenPulseController extends ChangeNotifier {
         statusMessage = wasRestoring
             ? deviceRestoreRecordCount == 0
                   ? 'OpenPulse had no newer device-local records.'
-                  : 'OpenPulse restored $deviceRestoreRecordCount device records.'
+                  : 'OpenPulse synced $deviceRestoreRecordCount new device records.'
             : 'OpenPulse backfill complete.';
         notifyListeners();
         return;
@@ -1046,11 +1048,9 @@ class OpenPulseController extends ChangeNotifier {
         recentLiveRecords = recentLiveRecords
             .takeLast(90)
             .toList(growable: false);
-        _refreshSelectedDay();
-        _refreshHrvSummary();
-        _refreshCalibrationTimeline();
+        _refreshDerived();
         statusMessage = deviceRestoreInProgress
-            ? 'Restoring OpenPulse device records: $deviceRestoreRecordCount.'
+            ? 'Syncing OpenPulse device records: $deviceRestoreRecordCount.'
             : 'Backfilled $replaced OpenPulse device records.';
       }
     }
@@ -1071,7 +1071,7 @@ class OpenPulseController extends ChangeNotifier {
         ...frame.samples,
       ].takeLast(420).toList(growable: false);
     }
-    _refreshSelectedDay();
+    _refreshDerived();
     statusMessage = frame.payloadLength > 0
         ? 'Raw PPG packet #${frame.sequence}: ${frame.payloadLength} bytes.'
         : 'Raw PPG packet #${frame.sequence}: ${frame.sensorLabel}.';
@@ -1191,24 +1191,32 @@ class OpenPulseController extends ChangeNotifier {
     notifyListeners();
   }
 
-  void _refreshSelectedDay() {
+  int _incrementalBackfillStartUptime() {
+    if (!storageReady || _lastDeviceUptimeMs <= 0) {
+      return 0;
+    }
+    return storage.latestDeviceUptimeForCurrentBoot(
+      currentDeviceUptimeMs: _lastDeviceUptimeMs,
+    );
+  }
+
+  // Day summary, HRV, and the calibration timeline are SQLite aggregations
+  // (the timeline scans hours of rows). Recomputing all three on every 1 Hz
+  // live packet janks the UI isolate, so coalesce them. User actions that
+  // change what is shown (day navigation, first load) force an immediate pass.
+  void _refreshDerived({bool force = false}) {
     if (!storageReady) {
       return;
     }
+    final now = DateTime.now();
+    if (!force &&
+        _lastDerivedRefreshAt != null &&
+        now.difference(_lastDerivedRefreshAt!) < _derivedRefreshInterval) {
+      return;
+    }
+    _lastDerivedRefreshAt = now;
     selectedDaySummary = storage.fetchDaySummary(selectedDay);
-  }
-
-  void _refreshHrvSummary() {
-    if (!storageReady) {
-      return;
-    }
     latestHrvSummary = storage.fetchHrvSummary();
-  }
-
-  void _refreshCalibrationTimeline() {
-    if (!storageReady) {
-      return;
-    }
     calibrationTimeline = storage.fetchCalibrationTimeline();
   }
 

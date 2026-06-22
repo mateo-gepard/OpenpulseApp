@@ -9,6 +9,15 @@ import 'package:sqlite3/sqlite3.dart';
 import '../models/openpulse_models.dart';
 
 class OpenPulseStorage {
+  OpenPulseStorage();
+
+  OpenPulseStorage.inMemoryForTests() {
+    final db = sqlite3.openInMemory();
+    db.execute('PRAGMA foreign_keys = ON;');
+    _createSchema(db);
+    _db = db;
+  }
+
   Database? _db;
 
   Future<void> open() async {
@@ -89,6 +98,7 @@ class OpenPulseStorage {
         hr_confidence INTEGER,
         spo2_confidence INTEGER,
         calibration_progress INTEGER,
+        hrv_rmssd_ms REAL,
         FOREIGN KEY(session_id) REFERENCES device_sessions(id)
       );
     ''');
@@ -97,6 +107,12 @@ class OpenPulseStorage {
       table: 'live_records',
       column: 'step_count',
       definition: 'INTEGER',
+    );
+    _addColumnIfMissing(
+      db,
+      table: 'live_records',
+      column: 'hrv_rmssd_ms',
+      definition: 'REAL',
     );
     _addColumnIfMissing(
       db,
@@ -301,8 +317,9 @@ class OpenPulseStorage {
         motion_status,
         hr_confidence,
         spo2_confidence,
-        calibration_progress
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        calibration_progress,
+        hrv_rmssd_ms
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ''',
       [
         sessionId,
@@ -322,6 +339,7 @@ class OpenPulseStorage {
         record.hrConfidence,
         record.spo2Confidence,
         record.calibrationProgress,
+        record.hrvRmssdMs,
       ],
     );
   }
@@ -356,6 +374,35 @@ class OpenPulseStorage {
       db.execute('ROLLBACK;');
       rethrow;
     }
+  }
+
+  int latestDeviceUptimeForCurrentBoot({
+    required int currentDeviceUptimeMs,
+    DateTime? now,
+    Duration tolerance = const Duration(minutes: 10),
+  }) {
+    if (currentDeviceUptimeMs <= 0) {
+      return 0;
+    }
+
+    final db = _requireDb();
+    final nowMs = (now ?? DateTime.now()).millisecondsSinceEpoch;
+    final estimatedBootStartMs = nowMs - currentDeviceUptimeMs;
+    final toleranceMs = tolerance.inMilliseconds;
+    final rows = db.select(
+      '''
+      SELECT MAX(device_uptime_ms) AS latest_uptime
+      FROM live_records
+      WHERE device_uptime_ms > 0
+        AND device_uptime_ms <= ?
+        AND ABS((wall_time_ms - device_uptime_ms) - ?) <= ?
+      ''',
+      [currentDeviceUptimeMs, estimatedBootStartMs, toleranceMs],
+    );
+    if (rows.isEmpty || rows.first['latest_uptime'] == null) {
+      return 0;
+    }
+    return rows.first['latest_uptime'] as int;
   }
 
   void insertControlWrite({
@@ -637,19 +684,23 @@ class OpenPulseStorage {
     final startMs = nowMs - window.inMilliseconds;
     final rows = db.select(
       '''
-      SELECT ibi_ms, hr_confidence, quality_flags, wall_time_ms
+      SELECT ibi_ms, hrv_rmssd_ms, hr_confidence, quality_flags, wall_time_ms
       FROM live_records
       WHERE wall_time_ms >= ?
-        AND ibi_ms IS NOT NULL
       ORDER BY wall_time_ms ASC
       ''',
       [startMs],
     );
 
-    final clean = <int>[];
+    // RMSSD comes from the firmware, which computes it over true consecutive
+    // beat intervals. The app must not derive RMSSD from the once-per-second
+    // smoothed IBI, which has the beat-to-beat variability averaged out.
+    final trustedRmssd = <double>[];
+    final trustedIbi = <int>[];
     var rejected = 0;
     for (final row in rows) {
-      final ibi = row['ibi_ms'] as int;
+      final ibi = row['ibi_ms'] as int?;
+      final rmssd = (row['hrv_rmssd_ms'] as num?)?.toDouble();
       final hrConfidence = row['hr_confidence'] as int?;
       final quality = row['quality_flags'] as int? ?? 0;
       final motionArtifact = quality & 0x02 != 0;
@@ -659,70 +710,40 @@ class OpenPulseStorage {
           (hrConfidence ?? 0) >= 55 &&
           !motionArtifact &&
           !lowPerfusion &&
-          !clipping &&
-          ibi >= 333 &&
-          ibi <= 2000;
-      if (trusted) {
-        clean.add(ibi);
-      } else {
-        rejected++;
-      }
-    }
-
-    if (clean.length < 8) {
-      return HrvSummary(
-        rmssdMs: null,
-        sdnnMs: null,
-        cleanIbiCount: clean.length,
-        rejectedIbiCount: rejected,
-        windowDuration: window,
-        confidence: clean.isEmpty ? 0 : (clean.length * 4).clamp(0, 35),
-        calibrationProgress: (clean.length * 2).clamp(0, 25),
-        status: 'Needs clean IBI',
-      );
-    }
-
-    final filtered = <int>[];
-    for (final ibi in clean) {
-      if (filtered.isEmpty) {
-        filtered.add(ibi);
-        continue;
-      }
-      final previous = filtered.last;
-      final diff = (ibi - previous).abs();
-      if (diff > 350 || diff > previous * 0.28) {
+          !clipping;
+      if (!trusted) {
         rejected++;
         continue;
       }
-      filtered.add(ibi);
+      if (rmssd != null && rmssd > 0) {
+        trustedRmssd.add(rmssd);
+      }
+      if (ibi != null && ibi >= 333 && ibi <= 2000) {
+        trustedIbi.add(ibi);
+      }
     }
 
-    if (filtered.length < 8) {
+    if (trustedRmssd.length < 8) {
       return HrvSummary(
         rmssdMs: null,
         sdnnMs: null,
-        cleanIbiCount: filtered.length,
+        cleanIbiCount: trustedRmssd.length,
         rejectedIbiCount: rejected,
         windowDuration: window,
-        confidence: 20,
-        calibrationProgress: 20,
-        status: 'Artifact-heavy',
+        confidence: trustedRmssd.isEmpty
+            ? 0
+            : (trustedRmssd.length * 4).clamp(0, 35),
+        calibrationProgress: (trustedRmssd.length * 2).clamp(0, 25),
+        status: 'Needs clean beats',
       );
     }
 
-    var diffSquares = 0.0;
-    for (var i = 1; i < filtered.length; i++) {
-      final diff = filtered[i] - filtered[i - 1];
-      diffSquares += diff * diff;
-    }
-    final rmssd = math.sqrt(diffSquares / (filtered.length - 1));
-    final mean = filtered.reduce((a, b) => a + b) / filtered.length;
-    final variance =
-        filtered.map((ibi) => math.pow(ibi - mean, 2)).reduce((a, b) => a + b) /
-        filtered.length;
-    final sdnn = math.sqrt(variance);
-    final coverage = (filtered.length / 300).clamp(0.0, 1.0);
-    final artifactRatio = rejected / (filtered.length + rejected);
+    final rmssd = _median(trustedRmssd);
+    // SDNN is a secondary metric derived from the reported IBI trend; the
+    // firmware does not stream a beat-accurate SDNN.
+    final sdnn = trustedIbi.length >= 8 ? _standardDeviation(trustedIbi) : null;
+    final coverage = (trustedRmssd.length / 300).clamp(0.0, 1.0);
+    final artifactRatio = rejected / (trustedRmssd.length + rejected);
     final confidence = (45 + coverage * 45 - artifactRatio * 35).round().clamp(
       0,
       95,
@@ -736,7 +757,7 @@ class OpenPulseStorage {
     return HrvSummary(
       rmssdMs: rmssd,
       sdnnMs: sdnn,
-      cleanIbiCount: filtered.length,
+      cleanIbiCount: trustedRmssd.length,
       rejectedIbiCount: rejected,
       windowDuration: window,
       confidence: confidence,
@@ -745,6 +766,23 @@ class OpenPulseStorage {
           ? 'Baseline ready'
           : 'Baseline building',
     );
+  }
+
+  double _median(List<double> values) {
+    final sorted = [...values]..sort();
+    final mid = sorted.length ~/ 2;
+    if (sorted.length.isOdd) {
+      return sorted[mid];
+    }
+    return (sorted[mid - 1] + sorted[mid]) / 2.0;
+  }
+
+  double _standardDeviation(List<int> values) {
+    final mean = values.reduce((a, b) => a + b) / values.length;
+    final variance =
+        values.map((v) => math.pow(v - mean, 2)).reduce((a, b) => a + b) /
+        values.length;
+    return math.sqrt(variance);
   }
 
   CalibrationTimeline fetchCalibrationTimeline({
@@ -758,7 +796,7 @@ class OpenPulseStorage {
       '''
       SELECT wall_time_ms,
              heart_rate_x10,
-             ibi_ms,
+             hrv_rmssd_ms,
              spo2_percent,
              quality_flags,
              hr_confidence,
@@ -772,14 +810,13 @@ class OpenPulseStorage {
 
     final points = <CalibrationTimelinePoint>[];
     final marks = <CalibrationUpdateMark>[];
-    final cleanIbis = <({int timeMs, int ibi})>[];
     int? previousProgress;
     int? latestProgress;
 
     for (final row in rows) {
       final timeMs = row['wall_time_ms'] as int;
       final hrX10 = row['heart_rate_x10'] as int?;
-      final ibi = row['ibi_ms'] as int?;
+      final rmssd = (row['hrv_rmssd_ms'] as num?)?.toDouble();
       final spo2 = row['spo2_percent'] as int?;
       final quality = row['quality_flags'] as int? ?? 0;
       final hrConfidence = row['hr_confidence'] as int?;
@@ -787,39 +824,14 @@ class OpenPulseStorage {
       final motionArtifact = quality & 0x02 != 0;
       final lowPerfusion = quality & 0x04 != 0;
       final clipping = quality & 0x20 != 0;
-      final trustedIbi =
-          ibi != null &&
+      final trusted =
           (hrConfidence ?? 0) >= 55 &&
           !motionArtifact &&
           !lowPerfusion &&
-          !clipping &&
-          ibi >= 333 &&
-          ibi <= 2000;
-
-      if (trustedIbi) {
-        cleanIbis.add((timeMs: timeMs, ibi: ibi));
-      }
-      cleanIbis.removeWhere(
-        (sample) =>
-            timeMs - sample.timeMs > const Duration(minutes: 5).inMilliseconds,
-      );
-
-      double? hrvRmssd;
-      if (cleanIbis.length >= 8) {
-        var diffSquares = 0.0;
-        var diffs = 0;
-        for (var i = 1; i < cleanIbis.length; i++) {
-          final diff = cleanIbis[i].ibi - cleanIbis[i - 1].ibi;
-          if (diff.abs() > 350 || diff.abs() > cleanIbis[i - 1].ibi * 0.28) {
-            continue;
-          }
-          diffSquares += diff * diff;
-          diffs++;
-        }
-        if (diffs >= 4) {
-          hrvRmssd = math.sqrt(diffSquares / diffs);
-        }
-      }
+          !clipping;
+      // Use the firmware's beat-to-beat RMSSD directly rather than deriving it
+      // from the smoothed once-per-second IBI trend.
+      final hrvRmssd = trusted && rmssd != null && rmssd > 0 ? rmssd : null;
 
       if (progress != null) {
         latestProgress = progress;

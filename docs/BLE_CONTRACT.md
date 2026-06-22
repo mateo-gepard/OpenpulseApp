@@ -89,11 +89,21 @@ Live record:
 | `uint8` | HR confidence 0-100, optional metrics extension |
 | `uint8` | SpO2 confidence 0-100, optional metrics extension |
 | `uint8` | optical calibration progress 0-100, optional metrics extension |
+| `uint32` | absolute `device_uptime_ms` within the current boot, optional extended extension |
+| `uint16` | HRV RMSSD ms over recent beats, `0` if unavailable, optional extended extension |
 
 Firmware built after the activity extension sends 17-byte live records.
-Firmware built after the metrics extension sends 20-byte live records. The
-first 12 bytes remain the original live record. Apps should accept legacy
-12-byte, activity 17-byte, and metrics 20-byte records.
+Firmware built after the metrics extension sends 20-byte live records.
+Firmware built after the extended extension sends 26-byte live records that
+append the absolute device uptime and a beat-to-beat HRV RMSSD. The first 12
+bytes remain the original live record. Apps should accept legacy 12-byte,
+activity 17-byte, metrics 20-byte, and extended 26-byte records.
+
+When the absolute uptime field is present the app must use it directly instead
+of accumulating the per-record uptime deltas; this prevents permanent wall-clock
+drift if a live notification is dropped. The RMSSD is computed on the firmware
+from true consecutive beat intervals — the app must not recompute RMSSD from the
+once-per-second IBI, which is smoothed and has beat-to-beat variability removed.
 
 Motion status:
 

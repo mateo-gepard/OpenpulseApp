@@ -596,8 +596,10 @@ class LiveView extends StatelessWidget {
               _FactRow(
                 'HRV',
                 hrv?.available == true
-                    ? 'RMSSD ${hrv!.rmssdMs!.toStringAsFixed(0)} ms, SDNN ${hrv.sdnnMs!.toStringAsFixed(0)} ms (${hrv.confidence}%)'
-                    : hrv?.status ?? 'Needs clean IBI',
+                    ? hrv!.sdnnMs != null
+                          ? 'RMSSD ${hrv.rmssdMs!.toStringAsFixed(0)} ms, SDNN ${hrv.sdnnMs!.toStringAsFixed(0)} ms (${hrv.confidence}%)'
+                          : 'RMSSD ${hrv.rmssdMs!.toStringAsFixed(0)} ms (${hrv.confidence}%)'
+                    : hrv?.status ?? 'Needs clean beats',
               ),
               const SizedBox(height: 12),
               _HexBox(text: _hexPreview(controller.latestLiveFrameHex)),
@@ -672,7 +674,7 @@ class HistoryView extends StatelessWidget {
               ),
               const SizedBox(height: 16),
               Text(
-                'On connect, OpenPulse sends up to about 2 hours of device-local flash history and the phone replaces overlapping local rows with those device records.',
+                'On connect, OpenPulse asks only for device-local records newer than the latest matching local sample, then stores the new rows locally.',
                 style: const TextStyle(color: _muted, height: 1.35),
               ),
             ],
@@ -859,7 +861,7 @@ class DeviceView extends StatelessWidget {
                       ? controller.requestBackfill
                       : null,
                   icon: const Icon(Icons.sync_rounded),
-                  label: const Text('Backfill'),
+                  label: const Text('Sync missing data'),
                 ),
               ),
             ],

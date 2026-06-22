@@ -9,6 +9,7 @@ class OpenPulseBleContract {
   static const legacyLiveRecordLength = 12;
   static const activityLiveRecordLength = 17;
   static const metricsLiveRecordLength = 20;
+  static const extendedLiveRecordLength = 26;
   static const backfillLiveRecordLength = 24;
 
   static final serviceUuid = Guid('f04d0000-57f5-4f5a-9b80-4f6f2f1d0001');
@@ -199,6 +200,7 @@ class OpenPulseBleContract {
           hrConfidence: hrConfidence,
           spo2Confidence: spo2Confidence,
           calibrationProgress: calibrationProgress,
+          hrvRmssdMs: null,
         ),
       );
     }
@@ -275,7 +277,9 @@ class OpenPulseBleContract {
     final sequence = data.getUint16(2, Endian.little);
     final availableRecordBytes = bytes.length - 4;
     final recordLength =
-        count > 0 && availableRecordBytes >= count * metricsLiveRecordLength
+        count > 0 && availableRecordBytes >= count * extendedLiveRecordLength
+        ? extendedLiveRecordLength
+        : count > 0 && availableRecordBytes >= count * metricsLiveRecordLength
         ? metricsLiveRecordLength
         : count > 0 && availableRecordBytes >= count * activityLiveRecordLength
         ? activityLiveRecordLength
@@ -309,7 +313,19 @@ class OpenPulseBleContract {
       final calibrationProgress = recordLength >= metricsLiveRecordLength
           ? data.getUint8(offset + 19)
           : null;
-      deviceUptime += delta;
+      final absoluteUptime = recordLength >= extendedLiveRecordLength
+          ? data.getUint32(offset + 20, Endian.little)
+          : null;
+      final hrvRmssd = recordLength >= extendedLiveRecordLength
+          ? data.getUint16(offset + 24, Endian.little)
+          : null;
+      // Absolute uptime, when present, prevents permanent wall-clock drift if a
+      // live notification is dropped; older records fall back to delta sums.
+      if (absoluteUptime != null) {
+        deviceUptime = absoluteUptime;
+      } else {
+        deviceUptime += delta;
+      }
 
       final wallTimeMs = syncedUnixMs + (deviceUptime - syncedDeviceUptimeMs);
       records.add(
@@ -328,6 +344,9 @@ class OpenPulseBleContract {
           hrConfidence: hrConfidence,
           spo2Confidence: spo2Confidence,
           calibrationProgress: calibrationProgress,
+          hrvRmssdMs: hrvRmssd == null || hrvRmssd == 0
+              ? null
+              : hrvRmssd.toDouble(),
         ),
       );
       offset += recordLength;

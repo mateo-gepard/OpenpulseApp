@@ -303,6 +303,7 @@ class LiveRecord {
     required this.hrConfidence,
     required this.spo2Confidence,
     required this.calibrationProgress,
+    this.hrvRmssdMs,
   });
 
   final DateTime receivedAt;
@@ -319,6 +320,7 @@ class LiveRecord {
   final int? hrConfidence;
   final int? spo2Confidence;
   final int? calibrationProgress;
+  final double? hrvRmssdMs;
 
   bool get hasSkinContact => qualityFlags & 0x01 != 0;
   bool get hasMotionArtifact => qualityFlags & 0x02 != 0;

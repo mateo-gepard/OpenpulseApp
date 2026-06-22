@@ -201,4 +201,40 @@ void main() {
     expect(record.spo2Confidence, 67);
     expect(record.calibrationProgress, 57);
   });
+
+  test('extended live frame uses absolute uptime and RMSSD', () {
+    final frame = OpenPulseBleContract.parseLiveFrame(
+      bytes: [
+        0x10, 0x01, 0x09, 0x00,
+        0xff, 0xff, 0xff, 0xff, // delta is ignored when absolute uptime present
+        0x62, 0x02, // hr x10 = 610 -> 61.0 bpm
+        0xee, 0x02, // ibi 750
+        0xe9, 0x03, // accel 1001
+        0x62, // spo2 98
+        0x41, // quality: skin contact + uncalibrated
+        0xd2, 0x04, 0x00, 0x00, // step 1234
+        0x00, // motion ok
+        0x58, // hr confidence 88
+        0x43, // spo2 confidence 67
+        0x39, // calibration 57
+        0x70, 0x17, 0x00, 0x00, // absolute uptime 6000
+        0x2a, 0x00, // rmssd 42 ms
+      ],
+      previousDeviceUptimeMs: 999999,
+      syncedUnixMs: 100000,
+      syncedDeviceUptimeMs: 5000,
+      receivedAt: DateTime.fromMillisecondsSinceEpoch(2000),
+    );
+
+    final record = frame!.records.single;
+    expect(frame.sequence, 9);
+    // Absolute uptime wins over the previous-uptime + delta accumulation.
+    expect(frame.lastDeviceUptimeMs, 6000);
+    expect(record.deviceUptimeMs, 6000);
+    expect(record.wallTime.millisecondsSinceEpoch, 101000);
+    expect(record.heartRateBpm, 61.0);
+    expect(record.stepCount, 1234);
+    expect(record.calibrationProgress, 57);
+    expect(record.hrvRmssdMs, 42.0);
+  });
 }

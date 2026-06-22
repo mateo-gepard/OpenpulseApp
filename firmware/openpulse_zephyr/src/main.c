@@ -21,7 +21,7 @@
 
 LOG_MODULE_REGISTER(openpulse, LOG_LEVEL_INF);
 
-#define OPENPULSE_FW_VERSION "0.1.6-optical-gain"
+#define OPENPULSE_FW_VERSION "0.1.7-hrv-uptime"
 #define OPENPULSE_HW_VERSION "xiao_ble/nrf52840/sense"
 
 #define MAXM86161_I2C_ADDR 0x62
@@ -69,6 +69,7 @@ LOG_MODULE_REGISTER(openpulse, LOG_LEVEL_INF);
 #define OP_LIVE_RECORD_BASE_LEN 12
 #define OP_LIVE_RECORD_ACTIVITY_LEN 17
 #define OP_LIVE_RECORD_METRICS_LEN 20
+#define OP_LIVE_RECORD_EXTENDED_LEN 26
 #define OP_BACKFILL_LIVE_RECORD_LEN 24
 #define OP_LIVE_RECORD_CALIBRATION_LEN 22
 #define OP_RAW_FRAME_HEADER_LEN 8
@@ -323,6 +324,7 @@ static uint8_t latest_spo2_percent = 0xff;
 static uint8_t latest_hr_confidence;
 static uint8_t latest_spo2_confidence;
 static uint8_t latest_metric_calibration;
+static uint16_t latest_hrv_rmssd_ms;
 static int64_t last_hr_compute_ms;
 static int64_t latest_hr_valid_ms;
 static int64_t latest_spo2_valid_ms;
@@ -354,18 +356,28 @@ static uint8_t last_puck_status[4] = {
 
 extern const struct bt_gatt_service_static openpulse_svc;
 
+struct control_command {
+	uint8_t command;
+	uint8_t payload_len;
+	uint8_t payload[16];
+};
+
+K_MSGQ_DEFINE(control_msgq, sizeof(struct control_command), 4, 4);
+
 static void stream_work_handler(struct k_work *work);
 static void sensor_work_handler(struct k_work *work);
 static void motion_work_handler(struct k_work *work);
 static void raw_window_work_handler(struct k_work *work);
 static void advertising_work_handler(struct k_work *work);
 static void backfill_work_handler(struct k_work *work);
+static void control_work_handler(struct k_work *work);
 static K_WORK_DELAYABLE_DEFINE(stream_work, stream_work_handler);
 static K_WORK_DELAYABLE_DEFINE(sensor_work, sensor_work_handler);
 static K_WORK_DELAYABLE_DEFINE(motion_work, motion_work_handler);
 static K_WORK_DELAYABLE_DEFINE(raw_window_work, raw_window_work_handler);
 static K_WORK_DELAYABLE_DEFINE(advertising_work, advertising_work_handler);
 static K_WORK_DELAYABLE_DEFINE(backfill_work, backfill_work_handler);
+static K_WORK_DELAYABLE_DEFINE(control_work, control_work_handler);
 
 static struct bt_uuid_16 dis_service_uuid = BT_UUID_INIT_16(0x180a);
 static struct bt_uuid_16 dis_manufacturer_uuid = BT_UUID_INIT_16(0x2a29);
@@ -478,6 +490,7 @@ static void reset_ppg_effective_rate(void);
 static int read_maxm86161_fifo_payload(uint8_t *payload,
 				       uint8_t max_payload_len,
 				       uint8_t *payload_len);
+static uint32_t isqrt_u64(uint64_t value);
 
 static ssize_t read_control(struct bt_conn *conn,
 			    const struct bt_gatt_attr *attr,
@@ -832,117 +845,170 @@ static ssize_t write_control(struct bt_conn *conn,
 			     uint8_t flags)
 {
 	const uint8_t *bytes = buf;
-	uint8_t command;
-	uint8_t payload_len;
-	const uint8_t *payload;
+	struct control_command cmd;
 
 	mark_app_activity();
 	if (offset != 0 || len < 2) {
 		return BT_GATT_ERR(BT_ATT_ERR_INVALID_OFFSET);
 	}
 
-	command = bytes[0];
-	payload_len = bytes[1];
-	if ((uint16_t)payload_len + 2U != len) {
+	cmd.command = bytes[0];
+	cmd.payload_len = bytes[1];
+	if ((uint16_t)cmd.payload_len + 2U != len) {
+		return BT_GATT_ERR(BT_ATT_ERR_INVALID_ATTRIBUTE_LEN);
+	}
+	if (cmd.payload_len > sizeof(cmd.payload)) {
 		return BT_GATT_ERR(BT_ATT_ERR_INVALID_ATTRIBUTE_LEN);
 	}
 
-	payload = &bytes[2];
-
-	switch (command) {
+	/*
+	 * Validate synchronously so the app still gets an immediate ATT error,
+	 * but defer every side effect (sensor I2C and shared optical-state
+	 * resets) to the system workqueue. Executing them here on the BT RX
+	 * thread would race stream_work/sensor_work, which touch the same I2C
+	 * bus, PPG rings, and calibration state without any locking.
+	 */
+	switch (cmd.command) {
 	case 0x01:
-		if (payload_len != 16) {
+		if (cmd.payload_len != 16) {
 			return BT_GATT_ERR(BT_ATT_ERR_INVALID_ATTRIBUTE_LEN);
 		}
-		synced_unix_ms = sys_get_le64(&payload[0]);
-		synced_device_uptime_ms = sys_get_le64(&payload[8]);
-		time_synced = true;
-		clock_anchor_valid = true;
-		current_mode = OP_MODE_ACTIVE;
-		last_live_notification_ms = 0;
-		notify_control_ack(command, 0);
-		k_work_reschedule(&stream_work, K_NO_WAIT);
 		break;
 	case 0x02:
-		if (payload_len != 1 || payload[0] > OP_MODE_SHIP) {
+		if (cmd.payload_len != 1 || bytes[2] > OP_MODE_SHIP) {
 			return BT_GATT_ERR(BT_ATT_ERR_VALUE_NOT_ALLOWED);
 		}
-		current_mode = (enum op_mode)payload[0];
-		if (current_mode == OP_MODE_ACTIVE ||
-		    current_mode == OP_MODE_LOW_POWER ||
-		    current_mode == OP_MODE_HR_ONLY) {
-			last_live_notification_ms = 0;
-			k_work_reschedule(&stream_work, K_NO_WAIT);
-		} else {
-			k_work_cancel_delayable(&stream_work);
-			stop_maxm86161();
-		}
-		notify_control_ack(command, 0);
 		break;
 	case 0x03:
-		if (payload_len != 2) {
+		if (cmd.payload_len != 2) {
 			return BT_GATT_ERR(BT_ATT_ERR_INVALID_ATTRIBUTE_LEN);
 		}
-		sampling_hz = sys_get_le16(payload);
-		maxm86161_configured = false;
-		reset_optical_processing_state(true);
-		notify_control_ack(command, 0);
+		{
+			uint16_t requested_hz = sys_get_le16(&bytes[2]);
+
+			if (requested_hz < 8U || requested_hz > 256U) {
+				return BT_GATT_ERR(BT_ATT_ERR_VALUE_NOT_ALLOWED);
+			}
+		}
 		break;
 	case 0x04:
-		if (payload_len != 3) {
+		if (cmd.payload_len != 3) {
 			return BT_GATT_ERR(BT_ATT_ERR_INVALID_ATTRIBUTE_LEN);
 		}
-		led_green_ma = payload[0];
-		led_red_ma = payload[1];
-		led_ir_ma = payload[2];
-		maxm86161_configured = false;
-		reset_optical_processing_state(true);
-		notify_control_ack(command, 0);
 		break;
 	case 0x05:
-		if (payload_len != 8) {
+		if (cmd.payload_len != 8) {
 			return BT_GATT_ERR(BT_ATT_ERR_INVALID_ATTRIBUTE_LEN);
 		}
-		start_device_backfill(sys_get_le64(payload));
-		notify_control_ack(command, 0);
 		break;
 	case 0x06:
-		if (payload_len != 2) {
+		if (cmd.payload_len != 2) {
 			return BT_GATT_ERR(BT_ATT_ERR_INVALID_ATTRIBUTE_LEN);
 		}
-		pending_raw_seconds = sys_get_le16(payload);
-		if (pending_raw_seconds == 0) {
-			k_work_cancel_delayable(&raw_window_work);
-			stop_maxm86161();
-			send_raw_frame(0, probe_maxm86161(), NULL, 0);
-			notify_control_ack(command, 0);
-			break;
-		}
-		pending_raw_sensor_status = prepare_maxm86161();
-		if (pending_raw_sensor_status == OP_SENSOR_STATUS_OK) {
-			k_work_reschedule(&raw_window_work, K_MSEC(OP_RAW_SETTLE_MS));
-		} else {
-			send_raw_frame(pending_raw_seconds, pending_raw_sensor_status, NULL, 0);
-		}
-		notify_control_ack(command, 0);
 		break;
 	case 0x07:
-		if (payload_len != 0) {
+		if (cmd.payload_len != 0) {
 			return BT_GATT_ERR(BT_ATT_ERR_INVALID_ATTRIBUTE_LEN);
 		}
-		current_mode = OP_MODE_SHIP;
-		backfill_active = false;
-		k_work_cancel_delayable(&backfill_work);
-		k_work_cancel_delayable(&stream_work);
-		stop_maxm86161();
-		notify_control_ack(command, 0);
 		break;
 	default:
-		notify_control_ack(command, 1);
+		notify_control_ack(cmd.command, 1);
 		return BT_GATT_ERR(BT_ATT_ERR_VALUE_NOT_ALLOWED);
 	}
 
+	if (cmd.payload_len > 0) {
+		memcpy(cmd.payload, &bytes[2], cmd.payload_len);
+	}
+	if (k_msgq_put(&control_msgq, &cmd, K_NO_WAIT) != 0) {
+		return BT_GATT_ERR(BT_ATT_ERR_INSUFFICIENT_RESOURCES);
+	}
+	k_work_reschedule(&control_work, K_NO_WAIT);
+
 	return len;
+}
+
+static void control_work_handler(struct k_work *work)
+{
+	struct control_command cmd;
+
+	ARG_UNUSED(work);
+
+	while (k_msgq_get(&control_msgq, &cmd, K_NO_WAIT) == 0) {
+		const uint8_t *payload = cmd.payload;
+
+		switch (cmd.command) {
+		case 0x01:
+			synced_unix_ms = sys_get_le64(&payload[0]);
+			synced_device_uptime_ms = sys_get_le64(&payload[8]);
+			time_synced = true;
+			clock_anchor_valid = true;
+			current_mode = OP_MODE_ACTIVE;
+			last_live_notification_ms = 0;
+			notify_control_ack(cmd.command, 0);
+			k_work_reschedule(&stream_work, K_NO_WAIT);
+			break;
+		case 0x02:
+			current_mode = (enum op_mode)payload[0];
+			if (current_mode == OP_MODE_ACTIVE ||
+			    current_mode == OP_MODE_LOW_POWER ||
+			    current_mode == OP_MODE_HR_ONLY) {
+				last_live_notification_ms = 0;
+				k_work_reschedule(&stream_work, K_NO_WAIT);
+			} else {
+				k_work_cancel_delayable(&stream_work);
+				stop_maxm86161();
+			}
+			notify_control_ack(cmd.command, 0);
+			break;
+		case 0x03:
+			sampling_hz = sys_get_le16(payload);
+			maxm86161_configured = false;
+			reset_optical_processing_state(true);
+			notify_control_ack(cmd.command, 0);
+			break;
+		case 0x04:
+			led_green_ma = payload[0];
+			led_red_ma = payload[1];
+			led_ir_ma = payload[2];
+			maxm86161_configured = false;
+			reset_optical_processing_state(true);
+			notify_control_ack(cmd.command, 0);
+			break;
+		case 0x05:
+			start_device_backfill(sys_get_le64(payload));
+			notify_control_ack(cmd.command, 0);
+			break;
+		case 0x06:
+			pending_raw_seconds = sys_get_le16(payload);
+			if (pending_raw_seconds == 0) {
+				k_work_cancel_delayable(&raw_window_work);
+				stop_maxm86161();
+				send_raw_frame(0, probe_maxm86161(), NULL, 0);
+				notify_control_ack(cmd.command, 0);
+				break;
+			}
+			pending_raw_sensor_status = prepare_maxm86161();
+			if (pending_raw_sensor_status == OP_SENSOR_STATUS_OK) {
+				k_work_reschedule(&raw_window_work,
+						  K_MSEC(OP_RAW_SETTLE_MS));
+			} else {
+				send_raw_frame(pending_raw_seconds,
+					       pending_raw_sensor_status, NULL, 0);
+			}
+			notify_control_ack(cmd.command, 0);
+			break;
+		case 0x07:
+			current_mode = OP_MODE_SHIP;
+			backfill_active = false;
+			k_work_cancel_delayable(&backfill_work);
+			k_work_cancel_delayable(&stream_work);
+			stop_maxm86161();
+			notify_control_ack(cmd.command, 0);
+			break;
+		default:
+			break;
+		}
+	}
 }
 
 static ssize_t read_puck_status(struct bt_conn *conn,
@@ -1501,6 +1567,7 @@ static void hold_hr_value(uint8_t *quality)
 
 	latest_hr_x10 = 0;
 	latest_ibi_ms = 0;
+	latest_hrv_rmssd_ms = 0;
 	latest_hr_confidence = 0;
 }
 
@@ -1613,6 +1680,7 @@ static void reset_optical_processing_state(bool reset_calibration)
 	reset_ppg_effective_rate();
 	latest_hr_x10 = 0;
 	latest_ibi_ms = 0;
+	latest_hrv_rmssd_ms = 0;
 	latest_spo2_percent = 0xff;
 	latest_hr_confidence = 0;
 	latest_spo2_confidence = 0;
@@ -1624,6 +1692,45 @@ static void reset_optical_processing_state(bool reset_calibration)
 	if (reset_calibration) {
 		memset(&optical_cal, 0, sizeof(optical_cal));
 	}
+}
+
+static void reset_optical_after_gain_change(void)
+{
+	/*
+	 * An auto-gain step changes the optical scale, so the sample buffers and
+	 * the brightness-dependent fast baselines are no longer valid. The
+	 * long-term calibration profile (start time, hourly progress, and the
+	 * scale-invariant red/IR ratio) must survive, otherwise a single LED
+	 * adjustment would discard hours of accumulated calibration.
+	 */
+	ppg_metrics_started_ms = 0;
+	ppg_buffer_reset();
+	reset_ppg_effective_rate();
+	latest_hr_x10 = 0;
+	latest_ibi_ms = 0;
+	latest_hrv_rmssd_ms = 0;
+	latest_spo2_percent = 0xff;
+	latest_hr_confidence = 0;
+	latest_spo2_confidence = 0;
+	last_hr_compute_ms = 0;
+	latest_hr_valid_ms = 0;
+	latest_spo2_valid_ms = 0;
+	spo2_ratio_filtered_x1000 = 0;
+
+	optical_cal.green_dc_ema = 0;
+	optical_cal.green_ac_ema = 0;
+	optical_cal.red_dc_ema = 0;
+	optical_cal.red_ac_ema = 0;
+	optical_cal.ir_dc_ema = 0;
+	optical_cal.ir_ac_ema = 0;
+	optical_cal.hour_green_dc_sum = 0;
+	optical_cal.hour_green_ac_sum = 0;
+	optical_cal.hour_red_dc_sum = 0;
+	optical_cal.hour_red_ac_sum = 0;
+	optical_cal.hour_ir_dc_sum = 0;
+	optical_cal.hour_ir_ac_sum = 0;
+	optical_cal.hour_ratio_sum = 0;
+	optical_cal.hour_good_windows = 0;
 }
 
 static void update_ppg_effective_rate(uint16_t green_samples)
@@ -1880,7 +1987,7 @@ static bool update_led_auto_gain(const struct ppg_window_stats *stats,
 
 	ppg_led_last_auto_gain_ms = now_ms;
 	maxm86161_configured = false;
-	reset_optical_processing_state(true);
+	reset_optical_after_gain_change();
 	*quality |= OP_QUALITY_PPG_UNCALIBRATED;
 	LOG_INF("PPG auto gain green=%umA red=%umA ir=%umA dc g/r/ir=%u/%u/%u",
 		(unsigned int)led_green_ma, (unsigned int)led_red_ma,
@@ -2293,6 +2400,46 @@ static bool ppg_hr_candidate_better(const struct ppg_hr_candidate *candidate,
 	return candidate->mean_abs > best->mean_abs;
 }
 
+static uint16_t compute_rmssd_from_intervals(const uint16_t *intervals,
+					     uint8_t count)
+{
+	/*
+	 * True beat-to-beat RMSSD over the consecutive detected beat intervals.
+	 * This is the physiologically correct input for HRV; the app must not
+	 * derive RMSSD from the once-per-second smoothed IBI it receives.
+	 */
+	uint64_t sum_sq = 0;
+	uint32_t diffs = 0;
+	uint16_t prev = 0;
+	bool have_prev = false;
+
+	for (uint8_t i = 0; i < count; i++) {
+		uint16_t ibi = intervals[i];
+
+		if (ibi < OP_PPG_MIN_IBI_MS || ibi > OP_PPG_MAX_IBI_MS) {
+			have_prev = false;
+			continue;
+		}
+		if (have_prev) {
+			int32_t diff = (int32_t)ibi - (int32_t)prev;
+
+			if (abs_i32(diff) <= 350U &&
+			    (uint32_t)abs_i32(diff) <= (uint32_t)prev * 28U / 100U) {
+				sum_sq += (uint64_t)((int64_t)diff * diff);
+				diffs++;
+			}
+		}
+		prev = ibi;
+		have_prev = true;
+	}
+
+	if (diffs < 4U) {
+		return 0;
+	}
+
+	return (uint16_t)isqrt_u64(sum_sq / diffs);
+}
+
 static void compute_hr_from_green(uint8_t *quality)
 {
 	struct ppg_channel_stats stats;
@@ -2461,6 +2608,8 @@ static void compute_hr_from_green(uint8_t *quality)
 	if (confidence < 80U || elapsed_ms < OP_PPG_HR_PROPER_WINDOW_MS) {
 		*quality |= OP_QUALITY_PPG_UNCALIBRATED;
 	}
+	latest_hrv_rmssd_ms = compute_rmssd_from_intervals(best.intervals,
+							   best.interval_count);
 	*quality |= OP_QUALITY_SKIN_CONTACT;
 	latest_hr_confidence = (uint8_t)confidence;
 	optical_cal.accepted_hr_windows++;
@@ -3267,7 +3416,7 @@ static void backfill_work_handler(struct k_work *work)
 
 static void stream_work_handler(struct k_work *work)
 {
-	uint8_t frame[4 + OP_LIVE_RECORD_METRICS_LEN];
+	uint8_t frame[4 + OP_LIVE_RECORD_EXTENDED_LEN];
 	struct op_history_record record;
 	uint8_t quality = 0;
 	int64_t now_ms;
@@ -3339,6 +3488,8 @@ static void stream_work_handler(struct k_work *work)
 	frame[21] = latest_hr_confidence;
 	frame[22] = latest_spo2_confidence;
 	frame[23] = latest_metric_calibration;
+	sys_put_le32((uint32_t)now_ms, &frame[24]);
+	sys_put_le16(latest_hrv_rmssd_ms, &frame[28]);
 
 	if (can_notify) {
 		(void)bt_gatt_notify(current_conn, &openpulse_svc.attrs[5],
