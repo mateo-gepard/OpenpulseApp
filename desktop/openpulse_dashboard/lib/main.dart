@@ -1736,27 +1736,292 @@ class RawPpgChart extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final series = [
-      ChartSeries(
-        label: 'Green',
-        color: AppColors.mint,
-        values: green.map((sample) => sample.toDouble()).toList(),
-      ),
-      ChartSeries(
-        label: 'Red',
-        color: AppColors.coral,
-        values: red.map((sample) => sample.toDouble()).toList(),
-      ),
-      ChartSeries(
-        label: 'IR',
-        color: AppColors.amber,
-        values: ir.map((sample) => sample.toDouble()).toList(),
-      ),
-    ];
+    final traces = [
+      PpgTrace(label: 'Green', color: AppColors.mint, samples: green),
+      PpgTrace(label: 'Red', color: AppColors.coral, samples: red),
+      PpgTrace(label: 'IR', color: AppColors.amber, samples: ir),
+    ].where((trace) => trace.samples.isNotEmpty).toList(growable: false);
     return SizedBox.expand(
-      child: CustomPaint(painter: _LinePainter(series: series)),
+      child: CustomPaint(
+        painter: _RawPpgPainter(
+          traces: traces,
+          sampleRateHz: 128,
+          maxSamples: 620,
+        ),
+      ),
     );
   }
+}
+
+class PpgTrace {
+  const PpgTrace({
+    required this.label,
+    required this.color,
+    required this.samples,
+  });
+
+  final String label;
+  final Color color;
+  final List<int> samples;
+}
+
+class ProcessedPpgTrace {
+  const ProcessedPpgTrace({
+    required this.trace,
+    required this.raw,
+    required this.ac,
+    required this.scale,
+  });
+
+  final PpgTrace trace;
+  final List<double> raw;
+  final List<double> ac;
+  final double scale;
+}
+
+class _RawPpgPainter extends CustomPainter {
+  _RawPpgPainter({
+    required this.traces,
+    required this.sampleRateHz,
+    required this.maxSamples,
+  });
+
+  final List<PpgTrace> traces;
+  final int sampleRateHz;
+  final int maxSamples;
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    if (size.width < 8 || size.height < 8) {
+      return;
+    }
+    final rect = Offset.zero & size;
+    final bg = Paint()
+      ..color = AppColors.surfaceRaised.withValues(alpha: .45)
+      ..style = PaintingStyle.fill;
+    canvas.drawRRect(
+      RRect.fromRectAndRadius(rect, const Radius.circular(8)),
+      bg,
+    );
+
+    final processed = traces
+        .map(_processTrace)
+        .where((trace) => trace.ac.length >= 3)
+        .toList(growable: false);
+    if (processed.isEmpty) {
+      _drawEmpty(canvas, size);
+      return;
+    }
+
+    final chart = Rect.fromLTWH(56, 40, size.width - 76, size.height - 78);
+    final gridPaint = Paint()
+      ..color = AppColors.line
+      ..strokeWidth = 1;
+    for (var i = 0; i < 5; i++) {
+      final y = chart.top + chart.height * (i / 4);
+      canvas.drawLine(Offset(chart.left, y), Offset(chart.right, y), gridPaint);
+    }
+    for (var i = 0; i <= 5; i++) {
+      final x = chart.left + chart.width * (i / 5);
+      canvas.drawLine(Offset(x, chart.top), Offset(x, chart.bottom), gridPaint);
+    }
+
+    final primary = _primaryTrace(processed);
+    final beatIndices = _detectBeats(primary.ac);
+    final markerPaint = Paint()
+      ..color = AppColors.blueInk.withValues(alpha: .24)
+      ..strokeWidth = 1.2;
+    for (final index in beatIndices) {
+      final x = _xForIndex(index, primary.ac.length, chart);
+      canvas.drawLine(
+        Offset(x, chart.top),
+        Offset(x, chart.bottom),
+        markerPaint,
+      );
+      canvas.drawCircle(Offset(x, chart.top + 9), 3, markerPaint);
+    }
+
+    final laneHeight = chart.height / processed.length;
+    for (var traceIndex = 0; traceIndex < processed.length; traceIndex++) {
+      final trace = processed[traceIndex];
+      final laneTop = chart.top + laneHeight * traceIndex;
+      final laneCenter = laneTop + laneHeight / 2;
+      final laneAmplitude = laneHeight * .38;
+      final baseline = Paint()
+        ..color = AppColors.lineStrong.withValues(alpha: .52)
+        ..strokeWidth = 1;
+      canvas.drawLine(
+        Offset(chart.left, laneCenter),
+        Offset(chart.right, laneCenter),
+        baseline,
+      );
+
+      final path = Path();
+      for (var i = 0; i < trace.ac.length; i++) {
+        final normalized = (trace.ac[i] / trace.scale).clamp(-1.25, 1.25);
+        final x = _xForIndex(i, trace.ac.length, chart);
+        final y = laneCenter - normalized * laneAmplitude;
+        if (i == 0) {
+          path.moveTo(x, y);
+        } else {
+          path.lineTo(x, y);
+        }
+      }
+      final stroke = Paint()
+        ..color = trace.trace.color
+        ..strokeWidth = 2.2
+        ..style = PaintingStyle.stroke
+        ..strokeCap = StrokeCap.round
+        ..strokeJoin = StrokeJoin.round;
+      canvas.drawPath(path, stroke);
+
+      _drawText(
+        canvas,
+        '${trace.trace.label} AC ±${trace.scale.toStringAsFixed(0)}',
+        Offset(12, laneCenter - 8),
+        color: trace.trace.color,
+        size: 12,
+      );
+    }
+
+    final seconds = primary.ac.length / sampleRateHz;
+    _drawText(
+      canvas,
+      '${primary.ac.length} samples · ${seconds.toStringAsFixed(1)}s @ ${sampleRateHz}Hz · ${beatIndices.length} beat markers',
+      const Offset(14, 12),
+      color: AppColors.muted,
+      size: 12,
+    );
+    _drawText(
+      canvas,
+      'baseline removed · robust AC scale',
+      Offset(chart.right - 198, chart.bottom + 24),
+      color: AppColors.muted,
+      size: 12,
+    );
+  }
+
+  ProcessedPpgTrace _processTrace(PpgTrace trace) {
+    final visible = trace.samples.length > maxSamples
+        ? trace.samples.sublist(trace.samples.length - maxSamples)
+        : trace.samples;
+    final raw = visible.map((sample) => sample.toDouble()).toList();
+    if (raw.isEmpty) {
+      return ProcessedPpgTrace(trace: trace, raw: raw, ac: const [], scale: 1);
+    }
+
+    final ac = <double>[];
+    var baseline = raw.first;
+    final alpha = 1 / (sampleRateHz * 1.8);
+    for (final sample in raw) {
+      baseline += (sample - baseline) * alpha;
+      ac.add(sample - baseline);
+    }
+
+    final absAc = ac.map((value) => value.abs()).toList()..sort();
+    final p95 = _percentileSorted(absAc, .95);
+    final p80 = _percentileSorted(absAc, .80);
+    final scale = math.max(12.0, math.max(p95 * 1.08, p80 * 1.35));
+    return ProcessedPpgTrace(trace: trace, raw: raw, ac: ac, scale: scale);
+  }
+
+  ProcessedPpgTrace _primaryTrace(List<ProcessedPpgTrace> processed) {
+    for (final label in ['Green', 'IR', 'Red']) {
+      for (final trace in processed) {
+        if (trace.trace.label == label) {
+          return trace;
+        }
+      }
+    }
+    return processed.first;
+  }
+
+  List<int> _detectBeats(List<double> ac) {
+    if (ac.length < sampleRateHz) {
+      return const [];
+    }
+    final smoothed = _movingAverage(ac, 5);
+    final sorted = smoothed.toList()..sort();
+    final positive = _percentileSorted(sorted, .95);
+    final negative = _percentileSorted(sorted, .05).abs();
+    final polarity = negative > positive ? -1.0 : 1.0;
+    final signal = smoothed.map((value) => value * polarity).toList();
+    final signalSorted = signal.toList()..sort();
+    final high = _percentileSorted(signalSorted, .92);
+    final median = _percentileSorted(signalSorted, .50);
+    final threshold = median + (high - median) * .42;
+    final minDistance = (sampleRateHz * .38).round();
+    final beats = <int>[];
+
+    for (var i = 2; i < signal.length - 2; i++) {
+      final value = signal[i];
+      final isPeak =
+          value > threshold &&
+          value >= signal[i - 1] &&
+          value >= signal[i + 1] &&
+          value > signal[i - 2] &&
+          value > signal[i + 2];
+      if (!isPeak) {
+        continue;
+      }
+      if (beats.isEmpty || i - beats.last >= minDistance) {
+        beats.add(i);
+      } else if (value > signal[beats.last]) {
+        beats[beats.length - 1] = i;
+      }
+    }
+    return beats;
+  }
+
+  List<double> _movingAverage(List<double> values, int radius) {
+    if (values.isEmpty) {
+      return const [];
+    }
+    final smoothed = <double>[];
+    for (var i = 0; i < values.length; i++) {
+      final start = math.max(0, i - radius);
+      final end = math.min(values.length - 1, i + radius);
+      var sum = 0.0;
+      for (var j = start; j <= end; j++) {
+        sum += values[j];
+      }
+      smoothed.add(sum / (end - start + 1));
+    }
+    return smoothed;
+  }
+
+  double _percentileSorted(List<double> sorted, double percentile) {
+    if (sorted.isEmpty) {
+      return 0;
+    }
+    final index = ((sorted.length - 1) * percentile).round();
+    return sorted[index.clamp(0, sorted.length - 1)];
+  }
+
+  double _xForIndex(int index, int length, Rect chart) {
+    if (length <= 1) {
+      return chart.left;
+    }
+    return chart.left + chart.width * index / (length - 1);
+  }
+
+  void _drawEmpty(Canvas canvas, Size size) {
+    final paint = Paint()
+      ..color = AppColors.line
+      ..strokeWidth = 1.2;
+    final y = size.height / 2;
+    canvas.drawLine(Offset(28, y), Offset(size.width - 28, y), paint);
+    _drawText(
+      canvas,
+      'Start raw mode to view the pulse AC waveform',
+      Offset(size.width / 2 - 118, y - 28),
+      color: AppColors.muted,
+      size: 13,
+    );
+  }
+
+  @override
+  bool shouldRepaint(covariant _RawPpgPainter oldDelegate) => true;
 }
 
 class ChartSeries {
