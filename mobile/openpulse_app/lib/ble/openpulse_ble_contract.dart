@@ -6,6 +6,7 @@ import '../models/openpulse_models.dart';
 
 class OpenPulseBleContract {
   static const advertisedName = 'OpenPulse';
+  static const secondaryAdvertisedName = 'OpenPulse Nova';
   static const legacyLiveRecordLength = 12;
   static const activityLiveRecordLength = 17;
   static const metricsLiveRecordLength = 20;
@@ -18,6 +19,13 @@ class OpenPulseBleContract {
   static final bulkBackfillUuid = Guid('f04d0003-57f5-4f5a-9b80-4f6f2f1d0001');
   static final rawPpgUuid = Guid('f04d0004-57f5-4f5a-9b80-4f6f2f1d0001');
   static final puckStatusUuid = Guid('f04d0005-57f5-4f5a-9b80-4f6f2f1d0001');
+
+  static bool isOpenPulseName(String? name) {
+    final trimmed = name?.trim();
+    return trimmed != null &&
+        trimmed.isNotEmpty &&
+        (trimmed == advertisedName || trimmed.startsWith('$advertisedName '));
+  }
 
   static const deviceInformationService = '180a';
   static const batteryService = '180f';

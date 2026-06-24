@@ -163,7 +163,7 @@ class _Header extends StatelessWidget {
                     ),
                     const SizedBox(height: 5),
                     Text(
-                      controller.statusMessage,
+                      '${controller.selectedDeviceLabel} · ${controller.statusMessage}',
                       maxLines: 1,
                       overflow: TextOverflow.ellipsis,
                       style: const TextStyle(color: _muted, fontSize: 13),
@@ -778,6 +778,114 @@ class HistoryView extends StatelessWidget {
   }
 }
 
+class _DeviceSelectorPanel extends StatelessWidget {
+  const _DeviceSelectorPanel({required this.controller});
+
+  final OpenPulseController controller;
+
+  @override
+  Widget build(BuildContext context) {
+    final devices = controller.knownDevices;
+    return _Surface(
+      child: Column(
+        children: [
+          if (devices.isEmpty)
+            const Padding(
+              padding: EdgeInsets.only(bottom: 12),
+              child: Text(
+                'No OpenPulse has been discovered on this phone yet.',
+                style: TextStyle(color: _muted, height: 1.35),
+              ),
+            )
+          else
+            for (final device in devices) ...[
+              _DeviceChoiceTile(controller: controller, device: device),
+              if (device != devices.last)
+                const Divider(height: 18, color: _line),
+            ],
+          SizedBox(
+            width: double.infinity,
+            child: OutlinedButton.icon(
+              onPressed: controller.phase == ConnectionPhase.scanning
+                  ? null
+                  : controller.scanAndConnect,
+              icon: const Icon(Icons.bluetooth_searching_rounded),
+              label: Text(
+                controller.phase == ConnectionPhase.scanning
+                    ? 'Scanning'
+                    : 'Scan for OpenPulse',
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _DeviceChoiceTile extends StatelessWidget {
+  const _DeviceChoiceTile({required this.controller, required this.device});
+
+  final OpenPulseController controller;
+  final OpenPulseDeviceProfile device;
+
+  @override
+  Widget build(BuildContext context) {
+    return InkWell(
+      borderRadius: BorderRadius.circular(16),
+      onTap: () => controller.selectDevice(device.remoteId),
+      child: Padding(
+        padding: const EdgeInsets.symmetric(vertical: 6),
+        child: Row(
+          children: [
+            Icon(
+              device.connected
+                  ? Icons.bluetooth_connected_rounded
+                  : device.selected
+                  ? Icons.radio_button_checked_rounded
+                  : Icons.radio_button_unchecked_rounded,
+              color: device.connected
+                  ? _mint
+                  : device.selected
+                  ? _blue
+                  : _muted,
+            ),
+            const SizedBox(width: 12),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    device.displayName,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: const TextStyle(
+                      fontWeight: FontWeight.w900,
+                      fontSize: 16,
+                    ),
+                  ),
+                  const SizedBox(height: 4),
+                  Text(
+                    '${device.statusLabel} · ${device.shortId}',
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: const TextStyle(color: _muted, fontSize: 12),
+                  ),
+                ],
+              ),
+            ),
+            if (device.selected)
+              const Padding(
+                padding: EdgeInsets.only(left: 10),
+                child: Icon(Icons.check_circle_rounded, color: _mint),
+              ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
 class DeviceView extends StatelessWidget {
   const DeviceView({super.key, required this.controller});
 
@@ -791,9 +899,13 @@ class DeviceView extends StatelessWidget {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
+        _SectionTitle('OpenPulse devices'),
+        _DeviceSelectorPanel(controller: controller),
+        const SizedBox(height: 18),
         _Surface(
           child: Column(
             children: [
+              _FactRow('Selected', controller.selectedDeviceLabel),
               _FactRow('GATT', controller.gattReady ? 'Ready' : 'Waiting'),
               _FactRow(
                 'OpenPulse BLE',

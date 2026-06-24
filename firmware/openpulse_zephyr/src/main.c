@@ -23,6 +23,9 @@ LOG_MODULE_REGISTER(openpulse, LOG_LEVEL_INF);
 
 #define OPENPULSE_FW_VERSION "0.1.8-cal-sync"
 #define OPENPULSE_HW_VERSION "xiao_ble/nrf52840/sense"
+#ifndef OPENPULSE_DEVICE_NAME
+#define OPENPULSE_DEVICE_NAME "OpenPulse"
+#endif
 
 #define MAXM86161_I2C_ADDR 0x62
 #define MAXM86161_REG_INT_STATUS1 0x00
@@ -449,7 +452,7 @@ BT_GATT_SERVICE_DEFINE(dis_svc,
 	BT_GATT_CHARACTERISTIC(&dis_model_uuid.uuid,
 			       BT_GATT_CHRC_READ,
 			       BT_GATT_PERM_READ,
-			       read_static_string, NULL, "OpenPulse XIAO nRF52840 Sense"),
+			       read_static_string, NULL, OPENPULSE_DEVICE_NAME),
 	BT_GATT_CHARACTERISTIC(&dis_firmware_uuid.uuid,
 			       BT_GATT_CHRC_READ,
 			       BT_GATT_PERM_READ,
@@ -3383,7 +3386,7 @@ static void advertising_work_handler(struct k_work *work)
 	if (!current_conn) {
 		err = start_advertising();
 		if (err == 0) {
-			LOG_INF("Advertising as OpenPulse");
+			LOG_INF("Advertising as %s", OPENPULSE_DEVICE_NAME);
 		} else if (err != -EALREADY) {
 			LOG_WRN("BLE advertising retry failed: %d", err);
 		}
@@ -3571,7 +3574,7 @@ static void disconnected(struct bt_conn *conn, uint8_t reason)
 	if (err && err != -EALREADY) {
 		LOG_ERR("BLE advertising restart failed: %d", err);
 	} else {
-		LOG_INF("Advertising as OpenPulse");
+		LOG_INF("Advertising as %s", OPENPULSE_DEVICE_NAME);
 	}
 }
 
@@ -3584,8 +3587,8 @@ static int start_advertising(void)
 {
 	static const struct bt_data ad[] = {
 		BT_DATA(BT_DATA_FLAGS, adv_flags, sizeof(adv_flags)),
-		BT_DATA(BT_DATA_NAME_COMPLETE, CONFIG_BT_DEVICE_NAME,
-			sizeof(CONFIG_BT_DEVICE_NAME) - 1),
+		BT_DATA(BT_DATA_NAME_COMPLETE, OPENPULSE_DEVICE_NAME,
+			sizeof(OPENPULSE_DEVICE_NAME) - 1),
 	};
 	static const struct bt_data sd[] = {
 		BT_DATA(BT_DATA_UUID128_ALL, adv_openpulse_service,
@@ -3599,7 +3602,7 @@ int main(void)
 {
 	int err;
 
-	LOG_INF("OpenPulse firmware starting");
+	LOG_INF("%s firmware starting", OPENPULSE_DEVICE_NAME);
 
 #if DT_NODE_HAS_PROP(DT_PATH(zephyr_user), battery_enable_gpios)
 	if (device_is_ready(battery_enable.port)) {
@@ -3634,7 +3637,7 @@ int main(void)
 	if (err && err != -EALREADY) {
 		LOG_ERR("BLE advertising failed: %d", err);
 	} else {
-		LOG_INF("Advertising as OpenPulse");
+		LOG_INF("Advertising as %s", OPENPULSE_DEVICE_NAME);
 	}
 
 	k_work_schedule(&sensor_work, K_NO_WAIT);

@@ -63,6 +63,42 @@ void main() {
     }
   });
 
+  test('device profiles and selected OpenPulse persist locally', () {
+    final storage = OpenPulseStorage.inMemoryForTests();
+
+    try {
+      storage.upsertDeviceProfile(
+        remoteId: 'old-remote',
+        advertisedName: 'OpenPulse',
+      );
+      storage.upsertDeviceProfile(
+        remoteId: 'new-remote',
+        advertisedName: 'OpenPulse Nova',
+        connected: true,
+      );
+      storage.saveSelectedDeviceRemoteId('new-remote');
+
+      final profiles = storage.fetchDeviceProfiles(
+        selectedRemoteId: storage.loadSelectedDeviceRemoteId(),
+        connectedRemoteId: 'new-remote',
+      );
+
+      final oldProfile = profiles.firstWhere(
+        (profile) => profile.remoteId == 'old-remote',
+      );
+      final newProfile = profiles.firstWhere(
+        (profile) => profile.remoteId == 'new-remote',
+      );
+
+      expect(oldProfile.displayName, 'OpenPulse');
+      expect(newProfile.displayName, 'OpenPulse Nova');
+      expect(newProfile.selected, isTrue);
+      expect(newProfile.connected, isTrue);
+    } finally {
+      storage.dispose();
+    }
+  });
+
   test('backfill storage skips records already present locally', () {
     final storage = OpenPulseStorage.inMemoryForTests();
     final now = DateTime.fromMillisecondsSinceEpoch(2_000_000);

@@ -62,6 +62,60 @@ class DeviceInformation {
   final String? hardware;
 }
 
+class OpenPulseDeviceProfile {
+  const OpenPulseDeviceProfile({
+    required this.remoteId,
+    required this.displayName,
+    required this.advertisedName,
+    required this.lastSeenAt,
+    required this.lastConnectedAt,
+    required this.selected,
+    required this.connected,
+  });
+
+  final String remoteId;
+  final String displayName;
+  final String advertisedName;
+  final DateTime? lastSeenAt;
+  final DateTime? lastConnectedAt;
+  final bool selected;
+  final bool connected;
+
+  String get shortId {
+    if (remoteId.length <= 8) {
+      return remoteId;
+    }
+    return remoteId.substring(remoteId.length - 8);
+  }
+
+  String get statusLabel {
+    if (connected) {
+      return 'Connected';
+    }
+    if (lastSeenAt != null) {
+      return 'Seen ${_relativeAge(lastSeenAt!)}';
+    }
+    if (lastConnectedAt != null) {
+      return 'Last connected ${_relativeAge(lastConnectedAt!)}';
+    }
+    return 'Known device';
+  }
+}
+
+String _relativeAge(DateTime time) {
+  final diff = DateTime.now().difference(time);
+  if (diff.isNegative || diff.inSeconds < 15) {
+    return 'now';
+  }
+  if (diff.inMinutes < 1) {
+    return '${diff.inSeconds}s ago';
+  }
+  if (diff.inHours < 1) {
+    return '${diff.inMinutes}m ago';
+  }
+  return '${diff.inHours}h ago';
+}
+
 class BatterySample {
   const BatterySample({
     required this.receivedAt,

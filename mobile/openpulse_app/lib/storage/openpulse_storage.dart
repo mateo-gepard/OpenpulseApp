@@ -199,6 +199,15 @@ class OpenPulseStorage {
         updated_at_ms INTEGER NOT NULL
       );
     ''');
+    db.execute('''
+      CREATE TABLE IF NOT EXISTS device_profiles (
+        remote_id TEXT PRIMARY KEY,
+        display_name TEXT NOT NULL,
+        advertised_name TEXT NOT NULL,
+        last_seen_ms INTEGER,
+        last_connected_ms INTEGER
+      );
+    ''');
   }
 
   void _addColumnIfMissing(
@@ -237,6 +246,110 @@ class OpenPulseStorage {
     } finally {
       statement.dispose();
     }
+  }
+
+  List<OpenPulseDeviceProfile> fetchDeviceProfiles({
+    String? selectedRemoteId,
+    String? connectedRemoteId,
+  }) {
+    final rows = _requireDb().select('''
+      SELECT remote_id, display_name, advertised_name, last_seen_ms, last_connected_ms
+      FROM device_profiles
+      ORDER BY COALESCE(last_connected_ms, last_seen_ms, 0) DESC, display_name ASC
+    ''');
+    return [
+      for (final row in rows)
+        OpenPulseDeviceProfile(
+          remoteId: row['remote_id'] as String,
+          displayName: row['display_name'] as String,
+          advertisedName: row['advertised_name'] as String,
+          lastSeenAt: _dateFromMs(row['last_seen_ms']),
+          lastConnectedAt: _dateFromMs(row['last_connected_ms']),
+          selected:
+              selectedRemoteId != null && row['remote_id'] == selectedRemoteId,
+          connected:
+              connectedRemoteId != null &&
+              row['remote_id'] == connectedRemoteId,
+        ),
+    ];
+  }
+
+  void upsertDeviceProfile({
+    required String remoteId,
+    required String advertisedName,
+    bool connected = false,
+  }) {
+    final db = _requireDb();
+    final nowMs = DateTime.now().millisecondsSinceEpoch;
+    final existing = db.select(
+      'SELECT display_name, advertised_name FROM device_profiles WHERE remote_id = ?',
+      [remoteId],
+    );
+    final defaultName = _defaultDeviceDisplayName(advertisedName, remoteId);
+    final displayName = existing.isEmpty
+        ? defaultName
+        : _updatedDeviceDisplayName(
+            currentDisplayName: existing.first['display_name'] as String,
+            currentAdvertisedName: existing.first['advertised_name'] as String,
+            nextAdvertisedName: advertisedName,
+            defaultName: defaultName,
+          );
+
+    db.execute(
+      '''
+      INSERT INTO device_profiles (
+        remote_id, display_name, advertised_name, last_seen_ms, last_connected_ms
+      ) VALUES (?, ?, ?, ?, ?)
+      ON CONFLICT(remote_id) DO UPDATE SET
+        display_name = excluded.display_name,
+        advertised_name = excluded.advertised_name,
+        last_seen_ms = excluded.last_seen_ms,
+        last_connected_ms = COALESCE(excluded.last_connected_ms, device_profiles.last_connected_ms)
+      ''',
+      [
+        remoteId,
+        displayName,
+        advertisedName.isEmpty ? defaultName : advertisedName,
+        nowMs,
+        connected ? nowMs : null,
+      ],
+    );
+  }
+
+  String? loadSelectedDeviceRemoteId() {
+    final rows = _requireDb().select(
+      'SELECT value FROM app_settings WHERE key = ?',
+      ['selected_device_remote_id'],
+    );
+    if (rows.isEmpty) {
+      return null;
+    }
+    final value = rows.first['value'] as String?;
+    return value == null || value.isEmpty ? null : value;
+  }
+
+  void saveSelectedDeviceRemoteId(String? remoteId) {
+    final db = _requireDb();
+    if (remoteId == null || remoteId.isEmpty) {
+      db.execute('DELETE FROM app_settings WHERE key = ?', [
+        'selected_device_remote_id',
+      ]);
+      return;
+    }
+    db.execute(
+      '''
+      INSERT INTO app_settings (key, value, updated_at_ms)
+      VALUES (?, ?, ?)
+      ON CONFLICT(key) DO UPDATE SET
+        value = excluded.value,
+        updated_at_ms = excluded.updated_at_ms
+      ''',
+      [
+        'selected_device_remote_id',
+        remoteId,
+        DateTime.now().millisecondsSinceEpoch,
+      ],
+    );
   }
 
   void closeSession(int? sessionId) {
@@ -383,8 +496,9 @@ class OpenPulseStorage {
 
   int replaceLiveRecordsFromDeviceBackfill(
     int? sessionId,
-    List<LiveRecord> records,
-  ) {
+    List<LiveRecord> records, {
+    String? remoteId,
+  }) {
     if (records.isEmpty) {
       return 0;
     }
@@ -395,10 +509,10 @@ class OpenPulseStorage {
     db.execute('BEGIN IMMEDIATE;');
     try {
       for (final record in records) {
-        if (_hasBackfilledLiveRecord(db, record)) {
+        if (_hasBackfilledLiveRecord(db, record, remoteId: remoteId)) {
           continue;
         }
-        _deleteOverlappingBackfillRecord(db, record);
+        _deleteOverlappingBackfillRecord(db, record, remoteId: remoteId);
         _insertLiveRecord(db, sessionId, record);
         stored++;
       }
@@ -410,35 +524,51 @@ class OpenPulseStorage {
     }
   }
 
-  bool _hasBackfilledLiveRecord(Database db, LiveRecord record) {
+  bool _hasBackfilledLiveRecord(
+    Database db,
+    LiveRecord record, {
+    String? remoteId,
+  }) {
     final rows = db.select(
       '''
       SELECT 1
-      FROM live_records
-      WHERE device_uptime_ms = ?
-        AND ABS((wall_time_ms - device_uptime_ms) - ?) <= ?
+      FROM live_records lr
+      WHERE lr.device_uptime_ms = ?
+        AND ABS((lr.wall_time_ms - lr.device_uptime_ms) - ?) <= ?
+        ${_remoteFilter('lr', remoteId)}
       LIMIT 1
       ''',
       [
         record.deviceUptimeMs,
         _recordBootStartMs(record),
         const Duration(minutes: 10).inMilliseconds,
+        ?remoteId,
       ],
     );
     return rows.isNotEmpty;
   }
 
-  void _deleteOverlappingBackfillRecord(Database db, LiveRecord record) {
+  void _deleteOverlappingBackfillRecord(
+    Database db,
+    LiveRecord record, {
+    String? remoteId,
+  }) {
     db.execute(
       '''
       DELETE FROM live_records
-      WHERE device_uptime_ms = ?
-        AND ABS((wall_time_ms - device_uptime_ms) - ?) <= ?
+      WHERE id IN (
+        SELECT lr.id
+        FROM live_records lr
+        WHERE lr.device_uptime_ms = ?
+          AND ABS((lr.wall_time_ms - lr.device_uptime_ms) - ?) <= ?
+          ${_remoteFilter('lr', remoteId)}
+      )
       ''',
       [
         record.deviceUptimeMs,
         _recordBootStartMs(record),
         const Duration(minutes: 10).inMilliseconds,
+        ?remoteId,
       ],
     );
   }
@@ -449,6 +579,7 @@ class OpenPulseStorage {
 
   int latestDeviceUptimeForCurrentBoot({
     required int currentDeviceUptimeMs,
+    String? remoteId,
     DateTime? now,
     Duration tolerance = const Duration(minutes: 10),
   }) {
@@ -463,12 +594,13 @@ class OpenPulseStorage {
     final rows = db.select(
       '''
       SELECT MAX(device_uptime_ms) AS latest_uptime
-      FROM live_records
-      WHERE device_uptime_ms > 0
-        AND device_uptime_ms <= ?
-        AND ABS((wall_time_ms - device_uptime_ms) - ?) <= ?
+      FROM live_records lr
+      WHERE lr.device_uptime_ms > 0
+        AND lr.device_uptime_ms <= ?
+        AND ABS((lr.wall_time_ms - lr.device_uptime_ms) - ?) <= ?
+        ${_remoteFilter('lr', remoteId)}
       ''',
-      [currentDeviceUptimeMs, estimatedBootStartMs, toleranceMs],
+      [currentDeviceUptimeMs, estimatedBootStartMs, toleranceMs, ?remoteId],
     );
     if (rows.isEmpty || rows.first['latest_uptime'] == null) {
       return 0;
@@ -695,15 +827,17 @@ class OpenPulseStorage {
     );
   }
 
-  DaySummary fetchDaySummary(DateTime day) {
+  DaySummary fetchDaySummary(DateTime day, {String? remoteId}) {
     final db = _requireDb();
     final start = OpenPulseTime.dayStart(day);
     final end = OpenPulseTime.nextDayStart(start);
     final startMs = start.millisecondsSinceEpoch;
     final endMs = end.millisecondsSinceEpoch;
 
+    List<Object?> args() => [startMs, endMs, ?remoteId];
+
     int scalar(String sql) {
-      final rows = db.select(sql, [startMs, endMs]);
+      final rows = db.select(sql, args());
       if (rows.isEmpty || rows.first.values.first == null) {
         return 0;
       }
@@ -711,7 +845,7 @@ class OpenPulseStorage {
     }
 
     int? nullableInt(String sql) {
-      final rows = db.select(sql, [startMs, endMs]);
+      final rows = db.select(sql, args());
       if (rows.isEmpty || rows.first.values.first == null) {
         return null;
       }
@@ -723,42 +857,40 @@ class OpenPulseStorage {
       return ms == null ? null : DateTime.fromMillisecondsSinceEpoch(ms);
     }
 
-    final stepRows = db.select(
-      '''
+    final stepRows = db.select('''
       SELECT step_count
       FROM live_records
       WHERE wall_time_ms >= ?
         AND wall_time_ms < ?
         AND step_count IS NOT NULL
+        ${_remoteFilter('live_records', remoteId)}
       ORDER BY wall_time_ms ASC, id ASC
-      ''',
-      [startMs, endMs],
-    );
+      ''', args());
     final stepSamples = [for (final row in stepRows) row['step_count'] as int];
 
     return DaySummary(
       day: start,
       liveRecords: scalar(
-        'SELECT COUNT(*) FROM live_records WHERE wall_time_ms >= ? AND wall_time_ms < ?',
+        'SELECT COUNT(*) FROM live_records lr WHERE lr.wall_time_ms >= ? AND lr.wall_time_ms < ? ${_remoteFilter('lr', remoteId)}',
       ),
       rawPpgFrames: scalar(
-        'SELECT COUNT(*) FROM raw_ppg_frames WHERE received_at_ms >= ? AND received_at_ms < ?',
+        'SELECT COUNT(*) FROM raw_ppg_frames rf WHERE rf.received_at_ms >= ? AND rf.received_at_ms < ? ${_remoteFilter('rf', remoteId)}',
       ),
       puckEvents: scalar(
-        'SELECT COUNT(*) FROM puck_events WHERE received_at_ms >= ? AND received_at_ms < ?',
+        'SELECT COUNT(*) FROM puck_events pe WHERE pe.received_at_ms >= ? AND pe.received_at_ms < ? ${_remoteFilter('pe', remoteId)}',
       ),
       controlWrites: scalar(
-        'SELECT COUNT(*) FROM control_writes WHERE written_at_ms >= ? AND written_at_ms < ?',
+        'SELECT COUNT(*) FROM control_writes cw WHERE cw.written_at_ms >= ? AND cw.written_at_ms < ? ${_remoteFilter('cw', remoteId)}',
       ),
       stepCount: _dailyStepCount(stepSamples),
       maxSteps: nullableInt(
-        'SELECT MAX(step_count) FROM live_records WHERE wall_time_ms >= ? AND wall_time_ms < ?',
+        'SELECT MAX(step_count) FROM live_records lr WHERE lr.wall_time_ms >= ? AND lr.wall_time_ms < ? ${_remoteFilter('lr', remoteId)}',
       ),
       lastLiveAt: nullableDate(
-        'SELECT MAX(wall_time_ms) FROM live_records WHERE wall_time_ms >= ? AND wall_time_ms < ?',
+        'SELECT MAX(wall_time_ms) FROM live_records lr WHERE lr.wall_time_ms >= ? AND lr.wall_time_ms < ? ${_remoteFilter('lr', remoteId)}',
       ),
       lastRawAt: nullableDate(
-        'SELECT MAX(received_at_ms) FROM raw_ppg_frames WHERE received_at_ms >= ? AND received_at_ms < ?',
+        'SELECT MAX(received_at_ms) FROM raw_ppg_frames rf WHERE rf.received_at_ms >= ? AND rf.received_at_ms < ? ${_remoteFilter('rf', remoteId)}',
       ),
     );
   }
@@ -785,18 +917,22 @@ class OpenPulseStorage {
     return total;
   }
 
-  HrvSummary fetchHrvSummary({Duration window = const Duration(minutes: 5)}) {
+  HrvSummary fetchHrvSummary({
+    Duration window = const Duration(minutes: 5),
+    String? remoteId,
+  }) {
     final db = _requireDb();
     final nowMs = DateTime.now().millisecondsSinceEpoch;
     final startMs = nowMs - window.inMilliseconds;
     final rows = db.select(
       '''
       SELECT ibi_ms, hrv_rmssd_ms, hr_confidence, quality_flags, wall_time_ms
-      FROM live_records
-      WHERE wall_time_ms >= ?
+      FROM live_records lr
+      WHERE lr.wall_time_ms >= ?
+        ${_remoteFilter('lr', remoteId)}
       ORDER BY wall_time_ms ASC
       ''',
-      [startMs],
+      [startMs, ?remoteId],
     );
 
     // RMSSD comes from the firmware, which computes it over true consecutive
@@ -855,7 +991,7 @@ class OpenPulseStorage {
       0,
       95,
     );
-    final baselineDays = _countDaysWithCleanIbi(db);
+    final baselineDays = _countDaysWithCleanIbi(db, remoteId: remoteId);
     final calibrationProgress = ((baselineDays / 14.0) * 100).round().clamp(
       0,
       100,
@@ -894,6 +1030,7 @@ class OpenPulseStorage {
 
   CalibrationTimeline fetchCalibrationTimeline({
     Duration window = const Duration(hours: 3),
+    String? remoteId,
   }) {
     final db = _requireDb();
     final now = DateTime.now();
@@ -908,11 +1045,12 @@ class OpenPulseStorage {
              quality_flags,
              hr_confidence,
              calibration_progress
-      FROM live_records
-      WHERE wall_time_ms >= ?
+      FROM live_records lr
+      WHERE lr.wall_time_ms >= ?
+        ${_remoteFilter('lr', remoteId)}
       ORDER BY wall_time_ms ASC
       ''',
-      [startMs],
+      [startMs, ?remoteId],
     );
 
     final points = <CalibrationTimelinePoint>[];
@@ -1133,17 +1271,68 @@ class OpenPulseStorage {
     return bytes;
   }
 
-  int _countDaysWithCleanIbi(Database db) {
-    final rows = db.select('''
+  int _countDaysWithCleanIbi(Database db, {String? remoteId}) {
+    final rows = db.select(
+      '''
       SELECT date(wall_time_ms / 1000, 'unixepoch') AS day, COUNT(*) AS count
-      FROM live_records
-      WHERE ibi_ms IS NOT NULL
-        AND COALESCE(hr_confidence, 0) >= 55
-        AND (quality_flags & 0x26) = 0
+      FROM live_records lr
+      WHERE lr.ibi_ms IS NOT NULL
+        AND COALESCE(lr.hr_confidence, 0) >= 55
+        AND (lr.quality_flags & 0x26) = 0
+        ${_remoteFilter('lr', remoteId)}
       GROUP BY day
       HAVING count >= 120
-    ''');
+    ''',
+      [?remoteId],
+    );
     return rows.length;
+  }
+
+  DateTime? _dateFromMs(Object? value) {
+    if (value is! int) {
+      return null;
+    }
+    return DateTime.fromMillisecondsSinceEpoch(value);
+  }
+
+  String _defaultDeviceDisplayName(String advertisedName, String remoteId) {
+    final trimmed = advertisedName.trim();
+    if (trimmed.isNotEmpty) {
+      return trimmed;
+    }
+    final suffix = remoteId.length <= 4
+        ? remoteId
+        : remoteId.substring(remoteId.length - 4);
+    return 'OpenPulse $suffix';
+  }
+
+  String _updatedDeviceDisplayName({
+    required String currentDisplayName,
+    required String currentAdvertisedName,
+    required String nextAdvertisedName,
+    required String defaultName,
+  }) {
+    final next = nextAdvertisedName.trim();
+    if (currentDisplayName.isEmpty ||
+        currentDisplayName == currentAdvertisedName ||
+        (currentDisplayName == 'OpenPulse' && next.startsWith('OpenPulse '))) {
+      return defaultName;
+    }
+    return currentDisplayName;
+  }
+
+  String _remoteFilter(String tableAlias, String? remoteId) {
+    if (remoteId == null || remoteId.isEmpty) {
+      return '';
+    }
+    return '''
+      AND EXISTS (
+        SELECT 1
+        FROM device_sessions ds
+        WHERE ds.id = $tableAlias.session_id
+          AND ds.remote_id = ?
+      )
+    ''';
   }
 
   Database _requireDb() {

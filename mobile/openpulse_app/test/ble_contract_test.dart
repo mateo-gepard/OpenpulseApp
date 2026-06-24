@@ -2,6 +2,12 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:openpulse_app/ble/openpulse_ble_contract.dart';
 
 void main() {
+  test('recognizes named OpenPulse devices', () {
+    expect(OpenPulseBleContract.isOpenPulseName('OpenPulse'), isTrue);
+    expect(OpenPulseBleContract.isOpenPulseName('OpenPulse Nova'), isTrue);
+    expect(OpenPulseBleContract.isOpenPulseName('Pulse'), isFalse);
+  });
+
   test('parses control acknowledgement frames', () {
     final ack = OpenPulseBleContract.parseControlAck([
       0x80,

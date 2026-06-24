@@ -32,6 +32,8 @@ class OpenPulseController extends ChangeNotifier {
   ControlAck? latestControlAck;
   BulkBackfillFrame? latestBackfillFrame;
   RawPpgFrame? latestRawPpgFrame;
+  List<OpenPulseDeviceProfile> knownDevices = const [];
+  String? selectedDeviceRemoteId;
   int livePacketCount = 0;
   int rawPpgPacketCount = 0;
   int latestLiveFrameByteCount = 0;
@@ -68,6 +70,7 @@ class OpenPulseController extends ChangeNotifier {
   String? debugExportError;
 
   BluetoothDevice? _device;
+  final Map<String, BluetoothDevice> _scanDevices = {};
   BluetoothCharacteristic? _control;
   BluetoothCharacteristic? _live;
   BluetoothCharacteristic? _bulk;
@@ -94,6 +97,26 @@ class OpenPulseController extends ChangeNotifier {
   DateTime? _lastDerivedRefreshAt;
 
   int? get currentStepCount => latestLiveRecord?.stepCount;
+
+  String? get connectedRemoteId => _device?.remoteId.toString();
+
+  OpenPulseDeviceProfile? get selectedDeviceProfile {
+    final selected = selectedDeviceRemoteId;
+    if (selected == null) {
+      return null;
+    }
+    for (final profile in knownDevices) {
+      if (profile.remoteId == selected) {
+        return profile;
+      }
+    }
+    return null;
+  }
+
+  String get selectedDeviceLabel =>
+      selectedDeviceProfile?.displayName ??
+      deviceName ??
+      OpenPulseBleContract.advertisedName;
 
   int? get selectedDayStepCount {
     final summary = selectedDaySummary;
@@ -145,7 +168,13 @@ class OpenPulseController extends ChangeNotifier {
   String? get deviceName {
     final device = _device;
     if (device == null) {
-      return null;
+      return selectedDeviceProfile?.displayName;
+    }
+    final remoteId = device.remoteId.toString();
+    for (final profile in knownDevices) {
+      if (profile.remoteId == remoteId) {
+        return profile.displayName;
+      }
     }
     final platformName = device.platformName;
     if (platformName.isNotEmpty) {
@@ -182,6 +211,8 @@ class OpenPulseController extends ChangeNotifier {
       await storage.open();
       storageReady = true;
       stepGoal = storage.loadStepGoal(defaultValue: stepGoal);
+      selectedDeviceRemoteId = storage.loadSelectedDeviceRemoteId();
+      _refreshKnownDevices();
       _refreshDerived(force: true);
       try {
         await notifications.initialize();
@@ -251,7 +282,9 @@ class OpenPulseController extends ChangeNotifier {
     }
 
     _intentionalDisconnect = false;
-    _setPhase(ConnectionPhase.scanning, 'Scanning for OpenPulse advertising.');
+    _scanDevices.clear();
+    _refreshKnownDevices();
+    _setPhase(ConnectionPhase.scanning, 'Scanning for OpenPulse hardware.');
     try {
       await FlutterBluePlus.stopScan();
     } catch (_) {
@@ -277,12 +310,52 @@ class OpenPulseController extends ChangeNotifier {
       _scanDuration + const Duration(milliseconds: 300),
     );
     if (phase == ConnectionPhase.scanning) {
+      final selected = selectedDeviceRemoteId;
+      final selectedDevice = selected == null ? null : _scanDevices[selected];
+      if (selectedDevice != null) {
+        unawaited(_connect(selectedDevice));
+        return;
+      }
+      if (selected == null && _scanDevices.length == 1) {
+        final remoteId = _scanDevices.keys.single;
+        selectedDeviceRemoteId = remoteId;
+        if (storageReady) {
+          storage.saveSelectedDeviceRemoteId(remoteId);
+        }
+        _refreshKnownDevices();
+        unawaited(_connect(_scanDevices.values.single));
+        return;
+      }
       _setPhase(
         ConnectionPhase.disconnected,
-        'No OpenPulse advertisement found yet.',
+        _scanDevices.isEmpty
+            ? 'No OpenPulse advertisement found yet.'
+            : 'Select which OpenPulse to connect.',
       );
-      _scheduleScanRetry();
+      if (_scanDevices.isEmpty || selectedDeviceRemoteId != null) {
+        _scheduleScanRetry();
+      }
     }
+  }
+
+  Future<void> selectDevice(String remoteId) async {
+    selectedDeviceRemoteId = remoteId;
+    if (storageReady) {
+      storage.saveSelectedDeviceRemoteId(remoteId);
+    }
+    _refreshKnownDevices();
+    _refreshDerived(force: true);
+    notifyListeners();
+
+    if (connectedRemoteId == remoteId) {
+      return;
+    }
+
+    if (_device != null) {
+      await disconnect();
+      _intentionalDisconnect = false;
+    }
+    await scanAndConnect();
   }
 
   Future<void> disconnect() async {
@@ -529,20 +602,11 @@ class OpenPulseController extends ChangeNotifier {
       return;
     }
     for (final result in results) {
-      final advName = result.advertisementData.advName;
-      final serviceUuids = result.advertisementData.serviceUuids;
-      final device = result.device;
-      final isOpenPulse =
-          advName == OpenPulseBleContract.advertisedName ||
-          device.advName == OpenPulseBleContract.advertisedName ||
-          device.platformName == OpenPulseBleContract.advertisedName ||
-          serviceUuids.any(
-            (uuid) => OpenPulseBleContract.uuidMatches(
-              uuid,
-              OpenPulseBleContract.serviceUuid,
-            ),
-          );
-      if (isOpenPulse) {
+      if (!_isOpenPulseScanResult(result)) {
+        continue;
+      }
+      _rememberScanResult(result);
+      if (selectedDeviceRemoteId == result.device.remoteId.toString()) {
         _autoScanRetryTimer?.cancel();
         _autoScanRetryTimer = null;
         unawaited(FlutterBluePlus.stopScan());
@@ -552,10 +616,60 @@ class OpenPulseController extends ChangeNotifier {
     }
   }
 
+  bool _isOpenPulseScanResult(ScanResult result) {
+    final advName = result.advertisementData.advName;
+    final serviceUuids = result.advertisementData.serviceUuids;
+    final device = result.device;
+    return OpenPulseBleContract.isOpenPulseName(advName) ||
+        OpenPulseBleContract.isOpenPulseName(device.advName) ||
+        OpenPulseBleContract.isOpenPulseName(device.platformName) ||
+        serviceUuids.any(
+          (uuid) => OpenPulseBleContract.uuidMatches(
+            uuid,
+            OpenPulseBleContract.serviceUuid,
+          ),
+        );
+  }
+
+  void _rememberScanResult(ScanResult result) {
+    final device = result.device;
+    final remoteId = device.remoteId.toString();
+    final advertisedName = _advertisedDeviceName(device, result);
+    _scanDevices[remoteId] = device;
+    if (storageReady) {
+      storage.upsertDeviceProfile(
+        remoteId: remoteId,
+        advertisedName: advertisedName,
+      );
+    }
+    _refreshKnownDevices();
+    statusMessage = _scanDevices.length == 1
+        ? 'Found ${_displayNameForRemoteId(remoteId)}.'
+        : 'Found ${_scanDevices.length} OpenPulse devices.';
+    notifyListeners();
+  }
+
+  String _advertisedDeviceName(BluetoothDevice device, [ScanResult? result]) {
+    final advName = result?.advertisementData.advName ?? '';
+    if (advName.isNotEmpty) {
+      return advName;
+    }
+    if (device.advName.isNotEmpty) {
+      return device.advName;
+    }
+    if (device.platformName.isNotEmpty) {
+      return device.platformName;
+    }
+    return OpenPulseBleContract.advertisedName;
+  }
+
   Future<void> _connect(BluetoothDevice device) async {
     _connectInFlight = true;
     _device = device;
-    _setPhase(ConnectionPhase.connecting, 'Connecting to OpenPulse.');
+    _setPhase(
+      ConnectionPhase.connecting,
+      'Connecting to ${_displayNameForRemoteId(device.remoteId.toString())}.',
+    );
     var retryNeeded = false;
     try {
       await _listenToDeviceConnection(device);
@@ -626,10 +740,18 @@ class OpenPulseController extends ChangeNotifier {
       // Some iOS restoration paths only expose app-connected devices.
     }
 
-    for (final device in candidates.values) {
+    final selected = selectedDeviceRemoteId;
+    final orderedCandidates = [
+      if (selected != null && candidates[selected] != null)
+        candidates[selected]!,
+      for (final device in candidates.values)
+        if (device.remoteId.toString() != selected) device,
+    ];
+
+    for (final device in orderedCandidates) {
       final likelyOpenPulse =
-          device.advName == OpenPulseBleContract.advertisedName ||
-          device.platformName == OpenPulseBleContract.advertisedName ||
+          OpenPulseBleContract.isOpenPulseName(device.advName) ||
+          OpenPulseBleContract.isOpenPulseName(device.platformName) ||
           candidates.length == 1;
       if (!likelyOpenPulse) {
         continue;
@@ -660,8 +782,8 @@ class OpenPulseController extends ChangeNotifier {
       _setPhase(
         ConnectionPhase.discovering,
         restored
-            ? 'OpenPulse reconnected. Restoring GATT.'
-            : 'Discovering OpenPulse GATT.',
+            ? '${_displayNameForRemoteId(device.remoteId.toString())} reconnected. Restoring GATT.'
+            : 'Discovering ${_displayNameForRemoteId(device.remoteId.toString())} GATT.',
       );
       try {
         await device.requestMtu(247);
@@ -675,9 +797,21 @@ class OpenPulseController extends ChangeNotifier {
 
       deviceInformation = await _readDeviceInformation(services);
       deviceInfoReady = true;
+      final remoteId = device.remoteId.toString();
+      final advertisedName = _advertisedDeviceName(device);
+      if (storageReady) {
+        storage.upsertDeviceProfile(
+          remoteId: remoteId,
+          advertisedName: advertisedName,
+          connected: true,
+        );
+        selectedDeviceRemoteId ??= remoteId;
+        storage.saveSelectedDeviceRemoteId(selectedDeviceRemoteId);
+        _refreshKnownDevices();
+      }
       _sessionId = storage.insertSession(
-        remoteId: device.remoteId.toString(),
-        deviceName: deviceName ?? OpenPulseBleContract.advertisedName,
+        remoteId: remoteId,
+        deviceName: deviceName ?? advertisedName,
         information: deviceInformation,
       );
 
@@ -688,7 +822,10 @@ class OpenPulseController extends ChangeNotifier {
       await _timeSync();
       await restoreDeviceLocalData();
 
-      _setPhase(ConnectionPhase.streaming, 'OpenPulse is connected and live.');
+      _setPhase(
+        ConnectionPhase.streaming,
+        '${_displayNameForRemoteId(remoteId)} is connected and live.',
+      );
       return true;
     } catch (error) {
       _clearGatt();
@@ -714,6 +851,7 @@ class OpenPulseController extends ChangeNotifier {
     _raw = null;
     _puck = null;
     _battery = null;
+    _device = null;
     controlNotifyReady = false;
     bulkBackfillReady = false;
     rawPpgReady = false;
@@ -1042,6 +1180,7 @@ class OpenPulseController extends ChangeNotifier {
         final replaced = storage.replaceLiveRecordsFromDeviceBackfill(
           _sessionId,
           records,
+          remoteId: connectedRemoteId ?? selectedDeviceRemoteId,
         );
         if (deviceRestoreInProgress) {
           deviceRestoreRecordCount += replaced;
@@ -1190,6 +1329,7 @@ class OpenPulseController extends ChangeNotifier {
       unawaited(subscription.cancel());
     }
     _valueSubscriptions.clear();
+    _refreshKnownDevices();
   }
 
   void _setPhase(ConnectionPhase next, String message) {
@@ -1204,6 +1344,7 @@ class OpenPulseController extends ChangeNotifier {
     }
     return storage.latestDeviceUptimeForCurrentBoot(
       currentDeviceUptimeMs: _lastDeviceUptimeMs,
+      remoteId: connectedRemoteId ?? selectedDeviceRemoteId,
     );
   }
 
@@ -1222,9 +1363,36 @@ class OpenPulseController extends ChangeNotifier {
       return;
     }
     _lastDerivedRefreshAt = now;
-    selectedDaySummary = storage.fetchDaySummary(selectedDay);
-    latestHrvSummary = storage.fetchHrvSummary();
-    calibrationTimeline = storage.fetchCalibrationTimeline();
+    final remoteId = selectedDeviceRemoteId ?? connectedRemoteId;
+    selectedDaySummary = storage.fetchDaySummary(
+      selectedDay,
+      remoteId: remoteId,
+    );
+    latestHrvSummary = storage.fetchHrvSummary(remoteId: remoteId);
+    calibrationTimeline = storage.fetchCalibrationTimeline(remoteId: remoteId);
+  }
+
+  void _refreshKnownDevices() {
+    if (!storageReady) {
+      return;
+    }
+    knownDevices = storage.fetchDeviceProfiles(
+      selectedRemoteId: selectedDeviceRemoteId,
+      connectedRemoteId: connectedRemoteId,
+    );
+  }
+
+  String _displayNameForRemoteId(String remoteId) {
+    for (final profile in knownDevices) {
+      if (profile.remoteId == remoteId) {
+        return profile.displayName;
+      }
+    }
+    final device = _scanDevices[remoteId];
+    if (device != null) {
+      return _advertisedDeviceName(device);
+    }
+    return OpenPulseBleContract.advertisedName;
   }
 
   void _notifyStepGoalIfNeeded(int steps) {
