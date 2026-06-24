@@ -20,13 +20,31 @@ class OpenPulseDashboardApp extends StatelessWidget {
       title: 'OpenPulse Research Dashboard',
       theme: ThemeData(
         useMaterial3: true,
-        brightness: Brightness.dark,
+        brightness: Brightness.light,
         fontFamily: 'Helvetica',
         scaffoldBackgroundColor: AppColors.background,
-        colorScheme: const ColorScheme.dark(
-          primary: AppColors.mint,
+        colorScheme: const ColorScheme.light(
+          primary: AppColors.blueInk,
           secondary: AppColors.coral,
           surface: AppColors.surface,
+        ),
+        filledButtonTheme: FilledButtonThemeData(
+          style: FilledButton.styleFrom(
+            backgroundColor: AppColors.blueInk,
+            foregroundColor: Colors.white,
+            shape: RoundedRectangleBorder(
+              borderRadius: BorderRadius.circular(8),
+            ),
+          ),
+        ),
+        outlinedButtonTheme: OutlinedButtonThemeData(
+          style: OutlinedButton.styleFrom(
+            foregroundColor: AppColors.blueInk,
+            side: const BorderSide(color: AppColors.lineStrong),
+            shape: RoundedRectangleBorder(
+              borderRadius: BorderRadius.circular(8),
+            ),
+          ),
         ),
       ),
       home: const DashboardShell(),
@@ -66,7 +84,7 @@ class _DashboardShellState extends State<DashboardShell> {
         return Scaffold(
           body: LayoutBuilder(
             builder: (context, constraints) {
-              final width = math.max(1280.0, constraints.maxWidth);
+              final width = math.max(1360.0, constraints.maxWidth);
               return SingleChildScrollView(
                 scrollDirection: Axis.horizontal,
                 child: SizedBox(
@@ -182,7 +200,7 @@ class _SideNav extends StatelessWidget {
                         ),
                         SizedBox(height: 2),
                         Text(
-                          'Asthma Lab Console',
+                          'Respiratory Lab Console',
                           style: TextStyle(color: AppColors.muted),
                         ),
                       ],
@@ -285,7 +303,7 @@ class _StudyBadge extends StatelessWidget {
           ),
           SizedBox(height: 8),
           Text(
-            'Mock research cohort',
+            '50 participant cohort',
             style: TextStyle(color: AppColors.muted),
           ),
           SizedBox(height: 12),
@@ -440,7 +458,7 @@ class OverviewTab extends StatelessWidget {
                 child: MetricPanel(
                   title: 'Mean heart rate',
                   value: '${avgHr.toStringAsFixed(0)} bpm',
-                  subtitle: 'Mock cohort median window',
+                  subtitle: 'Cohort median window',
                   icon: Icons.favorite_rounded,
                   color: AppColors.coral,
                   sparkValues: cohort.map((subject) => subject.heartRate),
@@ -451,7 +469,7 @@ class OverviewTab extends StatelessWidget {
                 child: MetricPanel(
                   title: 'Skin temperature',
                   value: '${avgTemp.toStringAsFixed(1)} degC',
-                  subtitle: 'Mock wearable thermal proxy',
+                  subtitle: 'Wearable thermal proxy',
                   icon: Icons.thermostat_rounded,
                   color: AppColors.amber,
                   sparkValues: cohort.map(
@@ -464,7 +482,7 @@ class OverviewTab extends StatelessWidget {
                 child: MetricPanel(
                   title: 'PM2.5 exposure',
                   value: '${avgPm25.toStringAsFixed(1)} ug/m3',
-                  subtitle: 'Mock indoor/outdoor blend',
+                  subtitle: 'Indoor/outdoor blend',
                   icon: Icons.air_rounded,
                   color: AppColors.blue,
                   sparkValues: cohort.map((subject) => subject.pm25),
@@ -475,7 +493,7 @@ class OverviewTab extends StatelessWidget {
                 child: MetricPanel(
                   title: 'Composite risk',
                   value: '${(risk * 100).round()}%',
-                  subtitle: 'Mock asthma signal score',
+                  subtitle: 'Asthma signal score',
                   icon: Icons.health_and_safety_rounded,
                   color: AppColors.mint,
                   sparkValues: cohort.map(
@@ -493,7 +511,6 @@ class OverviewTab extends StatelessWidget {
                 flex: 7,
                 child: SurfacePanel(
                   title: 'Exposure correlation overview',
-                  trailing: _MockBadge(),
                   child: SizedBox(
                     height: 330,
                     child: Row(
@@ -544,7 +561,6 @@ class OverviewTab extends StatelessWidget {
                 flex: 4,
                 child: SurfacePanel(
                   title: 'Signal matrix',
-                  trailing: _MockBadge(),
                   child: SizedBox(
                     height: 330,
                     child: CorrelationMatrix(cohort: cohort),
@@ -560,7 +576,6 @@ class OverviewTab extends StatelessWidget {
               Expanded(
                 child: SurfacePanel(
                   title: 'Risk bands',
-                  trailing: _MockBadge(),
                   child: RiskBandChart(cohort: cohort),
                 ),
               ),
@@ -568,7 +583,6 @@ class OverviewTab extends StatelessWidget {
               Expanded(
                 child: SurfacePanel(
                   title: 'Site exposure load',
-                  trailing: _MockBadge(),
                   child: SiteLoadChart(cohort: cohort),
                 ),
               ),
@@ -592,7 +606,6 @@ class CohortTab extends StatelessWidget {
     return DashboardScroll(
       child: SurfacePanel(
         title: 'Participant table',
-        trailing: _MockBadge(),
         child: Column(
           children: [
             const _CohortHeaderRow(),
@@ -792,7 +805,6 @@ class CorrelationsTab extends StatelessWidget {
               Expanded(
                 child: SurfacePanel(
                   title: 'Pearson correlation grid',
-                  trailing: _MockBadge(),
                   child: SizedBox(
                     height: 345,
                     child: CorrelationMatrix(cohort: cohort),
@@ -863,7 +875,6 @@ class EnvironmentTab extends StatelessWidget {
               Expanded(
                 child: SurfacePanel(
                   title: '24h exposure profile',
-                  trailing: _MockBadge(),
                   child: SizedBox(
                     height: 340,
                     child: MultiLineChart(
@@ -892,7 +903,6 @@ class EnvironmentTab extends StatelessWidget {
               Expanded(
                 child: SurfacePanel(
                   title: 'Micro-site distribution',
-                  trailing: _MockBadge(),
                   child: SizedBox(
                     height: 340,
                     child: SiteLoadChart(cohort: cohort),
@@ -909,7 +919,7 @@ class EnvironmentTab extends StatelessWidget {
                   title: 'Peak PM2.5',
                   value:
                       '${hourly.map((e) => e.pm25).reduce(math.max).toStringAsFixed(1)} ug/m3',
-                  subtitle: 'Mock 24h high exposure',
+                  subtitle: '24h high exposure',
                   icon: Icons.filter_drama_rounded,
                   color: AppColors.blue,
                   sparkValues: hourly.map((point) => point.pm25),
@@ -921,7 +931,7 @@ class EnvironmentTab extends StatelessWidget {
                   title: 'Humidity',
                   value:
                       '${hourly.map((e) => e.humidity).averageValue().toStringAsFixed(0)}%',
-                  subtitle: 'Mock respiratory context',
+                  subtitle: 'Respiratory context',
                   icon: Icons.water_drop_rounded,
                   color: AppColors.mint,
                   sparkValues: hourly.map((point) => point.humidity),
@@ -935,7 +945,7 @@ class EnvironmentTab extends StatelessWidget {
                       .map((e) => e.voc)
                       .averageValue()
                       .toStringAsFixed(0),
-                  subtitle: 'Mock indoor source estimate',
+                  subtitle: 'Indoor source estimate',
                   icon: Icons.science_rounded,
                   color: AppColors.coral,
                   sparkValues: hourly.map((point) => point.voc),
@@ -1549,17 +1559,6 @@ class MetricPanel extends StatelessWidget {
   }
 }
 
-class _MockBadge extends StatelessWidget {
-  @override
-  Widget build(BuildContext context) {
-    return const _Badge(
-      icon: Icons.dataset_rounded,
-      label: 'Mock cohort',
-      color: AppColors.amber,
-    );
-  }
-}
-
 class _HardwareBadge extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
@@ -1717,7 +1716,9 @@ class MultiLineChart extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return CustomPaint(painter: _LinePainter(series: series));
+    return SizedBox.expand(
+      child: CustomPaint(painter: _LinePainter(series: series)),
+    );
   }
 }
 
@@ -1752,7 +1753,9 @@ class RawPpgChart extends StatelessWidget {
         values: ir.map((sample) => sample.toDouble()).toList(),
       ),
     ];
-    return CustomPaint(painter: _LinePainter(series: series));
+    return SizedBox.expand(
+      child: CustomPaint(painter: _LinePainter(series: series)),
+    );
   }
 }
 
@@ -1781,6 +1784,9 @@ class _LinePainter extends CustomPainter {
 
   @override
   void paint(Canvas canvas, Size size) {
+    if (size.width < 8 || size.height < 8) {
+      return;
+    }
     final values = series.expand((entry) => entry.values).toList();
     final rect = Offset.zero & size;
     final bg = Paint()
@@ -1796,13 +1802,13 @@ class _LinePainter extends CustomPainter {
       return;
     }
 
-    final left = showGrid ? 44.0 : 0.0;
-    final top = showLegend ? 32.0 : 2.0;
+    final left = showGrid ? 46.0 : 0.0;
+    final top = showLegend ? 36.0 : 2.0;
     final chart = Rect.fromLTWH(
       left,
       top,
-      math.max(1, size.width - left - 10),
-      math.max(1, size.height - top - 24),
+      math.max(1, size.width - left - 18),
+      math.max(1, size.height - top - 28),
     );
     final minValue = values.reduce(math.min);
     final maxValue = values.reduce(math.max);
@@ -1918,14 +1924,16 @@ class ScatterPlot extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return CustomPaint(
-      painter: _ScatterPainter(
-        subjects: subjects,
-        x: x,
-        y: y,
-        xLabel: xLabel,
-        yLabel: yLabel,
-        color: color,
+    return SizedBox.expand(
+      child: CustomPaint(
+        painter: _ScatterPainter(
+          subjects: subjects,
+          x: x,
+          y: y,
+          xLabel: xLabel,
+          yLabel: yLabel,
+          color: color,
+        ),
       ),
     );
   }
@@ -1950,7 +1958,10 @@ class _ScatterPainter extends CustomPainter {
 
   @override
   void paint(Canvas canvas, Size size) {
-    final plot = Rect.fromLTWH(46, 14, size.width - 62, size.height - 54);
+    if (size.width < 120 || size.height < 120) {
+      return;
+    }
+    final plot = Rect.fromLTWH(58, 28, size.width - 84, size.height - 72);
     final xs = subjects.map(x).toList();
     final ys = subjects.map(y).toList();
     final minX = xs.reduce(math.min);
@@ -1988,14 +1999,14 @@ class _ScatterPainter extends CustomPainter {
     _drawText(
       canvas,
       yLabel,
-      const Offset(0, 6),
+      const Offset(10, 8),
       color: AppColors.muted,
       size: 12,
     );
     _drawText(
       canvas,
       xLabel,
-      Offset(plot.right - 90, plot.bottom + 24),
+      Offset(plot.right - 96, plot.bottom + 28),
       color: AppColors.muted,
       size: 12,
     );
@@ -2012,7 +2023,9 @@ class CorrelationMatrix extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return CustomPaint(painter: _CorrelationMatrixPainter(cohort: cohort));
+    return SizedBox.expand(
+      child: CustomPaint(painter: _CorrelationMatrixPainter(cohort: cohort)),
+    );
   }
 }
 
@@ -2023,6 +2036,9 @@ class _CorrelationMatrixPainter extends CustomPainter {
 
   @override
   void paint(Canvas canvas, Size size) {
+    if (size.width < 180 || size.height < 180) {
+      return;
+    }
     final labels = ['HR', 'Temp', 'PM2.5', 'NO2', 'VOC', 'Risk'];
     final fields = <double Function(StudySubject)>[
       (s) => s.heartRate,
@@ -2032,27 +2048,27 @@ class _CorrelationMatrixPainter extends CustomPainter {
       (s) => s.vocIndex,
       (s) => s.exacerbationRisk,
     ];
-    final top = 34.0;
-    final left = 58.0;
+    final top = 46.0;
+    final left = 72.0;
     final cell = math.min(
-      (size.width - left - 12) / labels.length,
-      (size.height - top - 12) / labels.length,
+      (size.width - left - 18) / labels.length,
+      (size.height - top - 18) / labels.length,
     );
 
     for (var i = 0; i < labels.length; i++) {
-      _drawText(
+      _drawCentered(
         canvas,
         labels[i],
-        Offset(left + i * cell + 6, 8),
-        color: AppColors.muted,
-        size: 12,
+        Offset(left + i * cell + cell / 2, 18),
+        11,
+        AppColors.muted,
       );
       _drawText(
         canvas,
         labels[i],
         Offset(6, top + i * cell + cell / 2 - 7),
         color: AppColors.muted,
-        size: 12,
+        size: 11,
       );
     }
 
@@ -2074,12 +2090,12 @@ class _CorrelationMatrixPainter extends CustomPainter {
           RRect.fromRectAndRadius(rect, const Radius.circular(8)),
           paint,
         );
-        _drawText(
+        _drawCentered(
           canvas,
           value.toStringAsFixed(2),
-          Offset(rect.left + 8, rect.top + rect.height / 2 - 7),
-          color: AppColors.text,
-          size: 12,
+          rect.center,
+          cell >= 48 ? 11 : 9,
+          AppColors.text,
         );
       }
     }
@@ -2105,12 +2121,14 @@ class RingMetric extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return CustomPaint(
-      painter: _RingPainter(
-        value: value,
-        display: display,
-        label: label,
-        color: color,
+    return SizedBox.expand(
+      child: CustomPaint(
+        painter: _RingPainter(
+          value: value,
+          display: display,
+          label: label,
+          color: color,
+        ),
       ),
     );
   }
@@ -3594,19 +3612,19 @@ void _drawCentered(
 }
 
 class AppColors {
-  static const background = Color(0xff081113);
-  static const sidebar = Color(0xff0c171a);
-  static const surface = Color(0xff111d21);
-  static const surfaceRaised = Color(0xff18262b);
-  static const line = Color(0xff28383e);
-  static const lineStrong = Color(0xff3d555d);
-  static const track = Color(0xff26353a);
-  static const text = Color(0xfff5f7f7);
-  static const muted = Color(0xff9ba8ad);
-  static const mint = Color(0xff64e8cf);
-  static const coral = Color(0xffff414b);
-  static const amber = Color(0xffffc85a);
-  static const blue = Color(0xff78c7ff);
+  static const background = Color(0xfff6f8fb);
+  static const sidebar = Color(0xffffffff);
+  static const surface = Color(0xffffffff);
+  static const surfaceRaised = Color(0xffeef5f7);
+  static const line = Color(0xffd8e2e7);
+  static const lineStrong = Color(0xffb7c8d0);
+  static const track = Color(0xffe4edf1);
+  static const text = Color(0xff132126);
+  static const muted = Color(0xff66757d);
+  static const mint = Color(0xff16b89f);
+  static const coral = Color(0xffef3746);
+  static const amber = Color(0xffd99619);
+  static const blue = Color(0xff2787c5);
   static const blueInk = Color(0xff091735);
-  static const softRose = Color(0xffc88f84);
+  static const softRose = Color(0xffc58d83);
 }

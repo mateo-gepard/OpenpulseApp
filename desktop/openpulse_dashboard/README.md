@@ -5,7 +5,7 @@ Desktop Flutter/macOS dashboard for an asthma exposure study concept.
 ## Data model
 
 - `Live data` uses real OpenPulse BLE hardware and the current firmware contract.
-- `Overview`, `Cohort`, `Correlations`, and `Environment` use deterministic mock data for 50 study participants.
+- `Overview`, `Cohort`, `Correlations`, and `Environment` use deterministic synthetic study data for 50 participants.
 - OpenPulse devices advertising as `OpenPulse` or `OpenPulse ...` are accepted, including `OpenPulse Nova`.
 
 ## Run
